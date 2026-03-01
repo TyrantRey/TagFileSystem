@@ -16,9 +16,11 @@ class TaggedFile(BaseModel):
 class FileMetadata(BaseModel):
     file_size: int
     time_added: datetime
+    file_format: str | None
+    file_type: str | None
 
 
 class Tag(BaseModel):
     name: str
-    tag_hash: int
+    tag_hash: str
     time_added: datetime

@@ -16,14 +16,13 @@ class WatchFileEngine:
         self,
         files_dir: Path,
         tags_dir: Path,
-        database_file: Path,
         watch_event_router: WatchEventRouter,
     ):
         self.logger = logging.getLogger(__name__)
         self.files_dir = files_dir
         self.tags_dir = tags_dir
-        self.database_file = database_file
         self.watch_event_router = watch_event_router
+        self.logger.info("Initialized WatchFileEngine")
 
     def ensure_directories(self):
         for d in (self.files_dir, self.tags_dir):
@@ -40,7 +39,11 @@ class WatchFileEngine:
 
     def _consolidate(self, changes: set) -> dict[str, Change]:
         consolidated: dict[str, Change] = {}
-        priority = {Change.deleted: 0, Change.added: 1, Change.modified: 2}
+        priority: dict[Change, int] = {
+            Change.deleted: 0,
+            Change.added: 1,
+            Change.modified: 2,
+        }
         for operation, raw_path in changes:
             if (
                 raw_path not in consolidated
