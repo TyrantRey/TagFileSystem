@@ -6,23 +6,26 @@ from pathlib import Path
 import watchfiles
 from watchfiles import Change, watch
 
+from tab_file_system.database.database_model import DatabaseEventRouter
 from tab_file_system.engine.model import WatchEventRouter
 
 watchfiles.main.logger.setLevel(logging.WARNING)
 
 
-class WatchFileEngine:
+class TagFileEngine:
     def __init__(
         self,
         files_dir: Path,
         tags_dir: Path,
         watch_event_router: WatchEventRouter,
+        database_event_router: DatabaseEventRouter,
     ):
         self.logger = logging.getLogger(__name__)
         self.files_dir = files_dir
         self.tags_dir = tags_dir
         self.watch_event_router = watch_event_router
-        self.logger.info("Initialized WatchFileEngine")
+        self.database_event_router = database_event_router
+        self.logger.info("Initialized TagFileEngine")
 
     def ensure_directories(self):
         for d in (self.files_dir, self.tags_dir):

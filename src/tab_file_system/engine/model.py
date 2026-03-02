@@ -16,3 +16,6 @@ class WatchEventRouter(EventRouter[Change]):
 
     def on_file_deleted(self, **kwargs) -> Callable:
         return self.register(Change.deleted, **kwargs)
+
+
+watchfile_router = WatchEventRouter()
