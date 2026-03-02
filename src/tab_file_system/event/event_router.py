@@ -37,19 +37,8 @@ class EventRouter(BaseModel, Generic[T]):
         ext: str | None = None,
         size_gt: int | None = None,
         size_lt: int | None = None,
-        extra_filters: dict[str, Callable] | None = None,
-        **kwargs,
     ) -> list[EventFilter]:
         filters: list[EventFilter] = []
-
-        # if "tag" in kwargs:
-        #     tag = kwargs["tag"]
-
-        #     def tag_filter(p: Path, t: str = tag) -> bool:
-        #         return t in p.parts
-
-        #     filters.append(tag_filter)
-
         if tags:
 
             def tag_filter(p: Path, m: FileMetadata, t: list[str] = tags) -> bool:
@@ -77,19 +66,6 @@ class EventRouter(BaseModel, Generic[T]):
                 return m.file_size < s
 
             filters.append(size_lt_filter)
-
-        if extra_filters:
-            for name, extra_filter in extra_filters.items():
-                args = kwargs.get(name, {})
-                filters.append(extra_filter()(**args))
-
-        # for extra_flags in kwargs:
-        #     extra_flag = kwargs[extra_flags]
-
-        #     def extra_filter(p: Path, s=extra_flag) -> bool:
-        #         return p.stat().st_size < s
-
-        #     filters.append(extra_filter)
 
         return filters
 
