@@ -14,3 +14,7 @@ wheels/
 *.log
 *.sqlite
 **test**
+
+**.db**
+
+.vscode/

@@ -154,6 +154,109 @@ TagFileSystem
     └── Pydantic-based settings for logging, database, folders
 ```
 
+
+## Database Schema
+
+### `files`
+
+| Column        | Type    | Constraints                                                                    |
+| ------------- | ------- | ------------------------------------------------------------------------------ |
+| `id`          | TEXT    | PRIMARY KEY                                                                    |
+| `path`        | TEXT    | NOT NULL, UNIQUE                                                               |
+| `hash`        | TEXT    | —                                                                              |
+| `size`        | INTEGER | NOT NULL, DEFAULT 0                                                            |
+| `format`      | TEXT    | —                                                                              |
+| `mime_type`   | TEXT    | —                                                                              |
+| `status`      | TEXT    | NOT NULL, DEFAULT `'active'`, CHECK IN (`'active'`, `'deleted'`, `'archived'`) |
+| `created_at`  | INTEGER | NOT NULL, DEFAULT `unixepoch()`                                                |
+| `modified_at` | INTEGER | NOT NULL, DEFAULT `unixepoch()`                                                |
+| `deleted_at`  | INTEGER | —                                                                              |
+
+> Indexes
+
+- `idx_files_hash` ON `hash` WHERE `hash IS NOT NULL`
+- `idx_files_status` ON `status`
+- `idx_files_created_at` ON `created_at`
+
+---
+
+### `tags`
+
+| Column        | Type    | Constraints                     |
+| ------------- | ------- | ------------------------------- |
+| `id`          | TEXT    | PRIMARY KEY                     |
+| `name`        | TEXT    | NOT NULL, UNIQUE                |
+| `category`    | TEXT    | —                               |
+| `description` | TEXT    | —                               |
+| `created_at`  | INTEGER | NOT NULL, DEFAULT `unixepoch()` |
+| `updated_at`  | INTEGER | NOT NULL, DEFAULT `unixepoch()` |
+
+> Indexes
+- `idx_tags_category` ON `category`
+
+---
+
+### `actions`
+
+| Column        | Type    | Constraints                     |
+| ------------- | ------- | ------------------------------- |
+| `id`          | TEXT    | PRIMARY KEY                     |
+| `name`        | TEXT    | NOT NULL, UNIQUE                |
+| `description` | TEXT    | —                               |
+| `icon`        | TEXT    | —                               |
+| `category`    | TEXT    | —                               |
+| `is_active`   | INTEGER | NOT NULL, DEFAULT 1             |
+| `created_at`  | INTEGER | NOT NULL, DEFAULT `unixepoch()` |
+
+> Indexes
+- `idx_actions_is_active` ON `is_active`
+
+---
+
+### `tagged_files`
+
+| Column        | Type    | Constraints                                  |
+| ------------- | ------- | -------------------------------------------- |
+| `tag_id`      | TEXT    | NOT NULL, FK → `tags(id)` ON DELETE CASCADE  |
+| `file_id`     | TEXT    | NOT NULL, FK → `files(id)` ON DELETE CASCADE |
+| `assigned_at` | INTEGER | NOT NULL, DEFAULT `unixepoch()`              |
+
+**Primary Key:** (`tag_id`, `file_id`)
+
+> Indexes
+- `idx_tagged_files_file_id` ON `file_id`
+
+---
+
+### `tag_actions`
+
+| Column       | Type    | Constraints                                                                  |
+| ------------ | ------- | ---------------------------------------------------------------------------- |
+| `tag_id`     | TEXT    | NOT NULL, FK → `tags(id)` ON DELETE CASCADE                                  |
+| `action_id`  | TEXT    | NOT NULL, FK → `actions(id)` ON DELETE CASCADE                               |
+| `trigger_on` | TEXT    | NOT NULL, DEFAULT `'manual'`, CHECK IN (`'manual'`, `'auto'`, `'scheduled'`) |
+| `created_at` | INTEGER | NOT NULL, DEFAULT `unixepoch()`                                              |
+
+**Primary Key:** (`tag_id`, `action_id`)
+
+---
+
+### `events`
+
+| Column        | Type    | Constraints                         |
+| ------------- | ------- | ----------------------------------- |
+| `id`          | TEXT    | PRIMARY KEY                         |
+| `name`        | TEXT    | NOT NULL                            |
+| `description` | TEXT    | —                                   |
+| `file_id`     | TEXT    | FK → `files(id)` ON DELETE SET NULL |
+| `tag_id`      | TEXT    | FK → `tags(id)` ON DELETE SET NULL  |
+| `occurred_at` | INTEGER | NOT NULL, DEFAULT `unixepoch()`     |
+
+> Indexes
+- `idx_events_occurred_at` ON `occurred_at`
+- `idx_events_file_id` ON `file_id`
+- `idx_events_tag_id` ON `tag_id`
+
 ### Data Flow
 
 1. File system changes detected → WatchFileEngine
@@ -191,11 +294,3 @@ src/tab_file_system/
 # Watch files with debug logging
 LOGGING_LEVEL=DEBUG python -m src.tab_file_system.main
 ```
-
-## License
-
-[Add license information]
-
-## Contributing
-
-[Add contribution guidelines]

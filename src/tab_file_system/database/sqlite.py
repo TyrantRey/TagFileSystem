@@ -1,22 +1,23 @@
 # Code by AkinoAlice@TyrantRey
 
-import logging
 import sqlite3
 from pathlib import Path
+from tab_file_system.core.logger import logger
+from tab_file_system.core.interface.file_metadata import Tag, FileMetadata
+
+from datetime import datetime
 
 
 class SQLiteBackend:
-    def __init__(self, database_file: Path) -> None:
-        self.logger = logging.getLogger(__name__)
+    def __init__(self) -> None:
+        self.logger = logger
 
-        self.database_file = database_file
+    def init_database(self, database_path: Path) -> bool:
+        self.database_file = database_path
+
         self.connection = sqlite3.connect(self.database_file)
-        self.cursor = self.connection.cursor()
         self.connection.row_factory = sqlite3.Row
 
-        self.init_database()
-
-    def init_database(self) -> None:
         sql_script = """
         PRAGMA journal_mode = WAL;
         PRAGMA foreign_keys = ON;
@@ -87,13 +88,38 @@ class SQLiteBackend:
             file_id     TEXT    REFERENCES files(id) ON DELETE SET NULL,
             tag_id      TEXT    REFERENCES tags(id)  ON DELETE SET NULL,
             occurred_at INTEGER NOT NULL DEFAULT (unixepoch())
+
+            CHECK (file_id IS NOT NULL OR tag_id IS NOT NULL)
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON events(occurred_at);
         CREATE INDEX IF NOT EXISTS idx_events_file_id     ON events(file_id);
         CREATE INDEX IF NOT EXISTS idx_events_tag_id      ON events(tag_id);
-                                  """
-        self.cursor.executescript(sql_script)
-        self.connection.commit()
-        self.logger.debug(f"{sql_script=}")
+        """
+
+        self.connection.executescript(sql_script)
         self.logger.info("Database initialized")
+        return True
+
+    def insert(self, path: str) -> int:
+        return 0
+
+    def update(self, path: str) -> None: ...
+
+    def delete(self, path: str) -> None: ...
+
+    def modify(self, path: str) -> None: ...
+
+    def query_tag(self, tag_name: str | None, tag_id: int | None) -> Tag | None: ...
+
+    def query_files(
+        self,
+        tags: list[Tag] | None = None,
+        tag_ids: list[int] | None = None,
+        filename: str | None = None,
+        file_hash: str | None = None,
+        file_format: str | None = None,
+        file_type: str | None = None,
+        file_size_range: tuple[int, int] | None = None,
+        file_added_range: tuple[datetime, datetime] | None = None,
+    ) -> list[FileMetadata] | None: ...

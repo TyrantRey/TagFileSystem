@@ -5,9 +5,11 @@ from pathlib import Path
 
 import watchfiles
 from watchfiles import Change, watch
-
 from tab_file_system.core.router.database_event import DatabaseEventRouter
 from tab_file_system.core.router.watch_event import WatchEventRouter
+from tab_file_system.core.interface.database import DatabaseEngineProtocol
+from tab_file_system.config import FolderSetting, DatabaseSetting
+from tab_file_system.core.logger import logger
 
 watchfiles.main.logger.setLevel(logging.WARNING)
 
@@ -15,16 +17,45 @@ watchfiles.main.logger.setLevel(logging.WARNING)
 class TagFileEngine:
     def __init__(
         self,
-        files_dir: Path,
-        tags_dir: Path,
         watch_event_router: WatchEventRouter,
         database_event_router: DatabaseEventRouter,
+        database_engine: DatabaseEngineProtocol,
+        root_dir: Path | None = None,
+        files_dir: Path | None = None,
+        tags_dir: Path | None = None,
+        database_path: Path | None = None,
     ):
-        self.logger = logging.getLogger(__name__)
-        self.files_dir = files_dir
-        self.tags_dir = tags_dir
+        self.logger = logger
+
+        self.folder_setting = FolderSetting()
+        self.database_setting = DatabaseSetting()
+
+        self.root_dir = (
+            root_dir if root_dir is not None else self.folder_setting.root_dir
+        )
+        self.files_dir = (
+            files_dir if files_dir is not None else self.folder_setting.files_dir
+        )
+        self.tags_dir = (
+            tags_dir if tags_dir is not None else self.folder_setting.tags_dir
+        )
+        self.database_path = (
+            database_path
+            if database_path is not None
+            else self.database_setting.db_file
+        )
+
+        self.logger.info(f"Root directory: {self.root_dir}")
+        self.logger.info(f"Files directory: {self.files_dir}")
+        self.logger.info(f"Tags directory: {self.tags_dir}")
+        self.logger.info(f"Database path: {self.database_path}")
+
         self.watch_event_router = watch_event_router
         self.database_event_router = database_event_router
+
+        self.database_engine = database_engine
+        self.init_database(self.database_path)
+
         self.logger.info("Initialized TagFileEngine")
 
     def ensure_directories(self):
@@ -32,6 +63,11 @@ class TagFileEngine:
             if not d.exists():
                 self.logger.info(f"Creating directory: {d}")
                 d.mkdir(parents=True, exist_ok=True)
+
+    def init_database(self, database_path: Path):
+        self.logger.info(f"Initializing database at {database_path}")
+
+        self.database_engine.init_database(database_path)
 
     def start(self):
         self.logger.info("Starting TagFileEngine")

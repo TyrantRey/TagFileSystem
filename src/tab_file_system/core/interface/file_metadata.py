@@ -15,7 +15,7 @@ class FileMetadata(BaseModel):
 
 class Tag(BaseModel):
     name: str
-    tag_hash: str
+    tag_id: str  # uuid
     time_added: datetime
 
 

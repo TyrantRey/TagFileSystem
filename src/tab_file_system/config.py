@@ -45,7 +45,7 @@ class LoggingSetting(BaseSettings):
 
 
 class DatabaseSetting(BaseSettings):
-    db_file: Path = Path("tag_file_system.sqlite")
+    db_file: Path = Path("system.db")
 
     @field_validator("db_file")
     @classmethod
@@ -58,8 +58,9 @@ class DatabaseSetting(BaseSettings):
 
 
 class FolderSetting(BaseSettings):
-    files_dir: Path = Path("./files")
-    tags_dir: Path = Path("./tags")
+    root_dir: Path = Path("./tag_file_system")
+    files_dir: Path = root_dir / "files"
+    tags_dir: Path = root_dir / "tags"
 
     @field_validator("files_dir", "tags_dir")
     @classmethod

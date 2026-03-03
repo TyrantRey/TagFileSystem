@@ -1,11 +1,14 @@
 # Code by AkinoAlice@TyrantRey
+
 import re
 
 from tab_file_system.core.interface.tag import Tag, TagAction, TagParserOutput
+from tab_file_system.core.logger import logger
 
 
 class TaggingParser:
     def __init__(self):
+        self.logger = logger
         self.pattern = r"(--|@@)(.*?)(?=--|@@|$)"
 
     def parse(self, path_string: str) -> TagParserOutput:
