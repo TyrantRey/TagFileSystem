@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Callable, Generic, TypeVar
 
 from pydantic import BaseModel, Field
-
-from tab_file_system.file_data.file_metadata import FileMetadata
+from tab_file_system.core.interface.file_metadata import FileMetadata
+from tab_file_system.core.interface.filter import FileMetadataFilter
 
 EventFilter = Callable[[Path, FileMetadata], bool]
 T = TypeVar("T")
@@ -32,55 +32,38 @@ class EventRouter(BaseModel, Generic[T]):
     handlers: dict[T, list[HandlerEntry]] = Field(default_factory=dict)
 
     def _build_filters(
-        self,
-        tags: list[str] | None = None,
-        ext: str | None = None,
-        size_gt: int | None = None,
-        size_lt: int | None = None,
+        self, file_object: FileMetadataFilter | None
     ) -> list[EventFilter]:
         filters: list[EventFilter] = []
-        if tags:
 
-            def tag_filter(p: Path, m: FileMetadata, t: list[str] = tags) -> bool:
-                return any(tag in p.parts for tag in t)
+        if file_object is None:
+            return filters
 
-            filters.append(tag_filter)
+        if file_object.tags:
+            t_list: list[str] = list(file_object.tags)
+            filters.append(lambda p, m: any(tag in p.parts for tag in t_list))
 
-        if ext:
+        if file_object.ext:
+            target_ext: str = file_object.ext
+            filters.append(lambda p, m: m.file_format == target_ext)
 
-            def ext_filter(p: Path, m: FileMetadata, e: str = ext) -> bool:
-                return m.file_format == e
+        if file_object.size_gt is not None:
+            gt_val = file_object.size_gt
+            filters.append(lambda p, m: m.file_size > gt_val)
 
-            filters.append(ext_filter)
-
-        if size_gt is not None:
-
-            def size_gt_filter(p: Path, m: FileMetadata, s: int = size_gt) -> bool:
-                return m.file_size > s
-
-            filters.append(size_gt_filter)
-
-        if size_lt is not None:
-
-            def size_lt_filter(p: Path, m: FileMetadata, s: int = size_lt) -> bool:
-                return m.file_size < s
-
-            filters.append(size_lt_filter)
+        if file_object.size_lt is not None and file_object.size_lt > 0:
+            lt_val = file_object.size_lt
+            filters.append(lambda p, m: m.file_size < lt_val)
 
         return filters
 
     def register(
         self,
         *events: T,
-        tags: list[str] | None = None,
-        ext: str | None = None,
-        size_gt: int | None = None,
-        size_lt: int | None = None,
+        file_metadata_filter: FileMetadataFilter | None = None,
         **kwargs,
     ) -> Callable:
-        filters = self._build_filters(
-            tags=tags, ext=ext, size_gt=size_gt, size_lt=size_lt, **kwargs
-        )
+        filters = self._build_filters(file_metadata_filter)
 
         def decorator(func: Callable) -> Callable:
             entry = HandlerEntry(func=func, filters=filters)

@@ -6,8 +6,8 @@ from pathlib import Path
 import watchfiles
 from watchfiles import Change, watch
 
-from tab_file_system.database.database_model import DatabaseEventRouter
-from tab_file_system.engine.model import WatchEventRouter
+from tab_file_system.core.router.database_event import DatabaseEventRouter
+from tab_file_system.core.router.watch_event import WatchEventRouter
 
 watchfiles.main.logger.setLevel(logging.WARNING)
 
@@ -34,6 +34,7 @@ class TagFileEngine:
                 d.mkdir(parents=True, exist_ok=True)
 
     def start(self):
+        self.logger.info("Starting TagFileEngine")
         self.ensure_directories()
         for changes in watch(self.files_dir.parent):
             consolidated = self._consolidate(changes)

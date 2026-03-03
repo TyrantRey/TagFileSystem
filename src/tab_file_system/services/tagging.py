@@ -1,7 +1,7 @@
 # Code by AkinoAlice@TyrantRey
 import re
 
-from tab_file_system.tag.model import Tag, TagAction, TagParserOutput
+from tab_file_system.core.interface.tag import Tag, TagAction, TagParserOutput
 
 
 class TaggingParser:

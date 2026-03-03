@@ -4,10 +4,12 @@ import logging
 from pathlib import Path
 from sys import stdout
 
-from tab_file_system.database.database_model import database_event_router
-from tab_file_system.engine.model import watchfile_router
-from tab_file_system.engine.watchfile_engine import TagFileEngine
-from tab_file_system.setting import DatabaseSetting, FolderSetting, LoggingSetting
+from tab_file_system.core.router.database_event import database_event_router
+from tab_file_system.core.router.watch_event import watchfile_router
+from tab_file_system.services.engine import TagFileEngine
+from tab_file_system.config import DatabaseSetting, FolderSetting, LoggingSetting
+from tab_file_system.core.interface.file_metadata import FileMetadata
+
 
 logging_setting = LoggingSetting()
 database_setting = DatabaseSetting()
@@ -29,22 +31,12 @@ tag_file_engine = TagFileEngine(
     watch_event_router=watchfile_router,
     database_event_router=database_event_router,
 )
-database_file = Path("./system_testing/tag_file_system.sqlite")
+# database_file = Path("./system_testing/tag_file_system.sqlite")
 
 
-# @watchfile_router.on_file_added()
-# def handle_added(path: Path):
-#     logger.info(f"File added: {path}")
-
-
-# @watchfile_router.on_file_deleted()
-# def handle_delete(path: Path):
-#     logger.info(f"File deleted: {path}")
-
-
-# @watchfile_router.on_file_modified()
-# def handle_modify(path: Path) -> None:
-#     logger.info(f"File modified: {path}")
+@watchfile_router.on_file_added()
+def handle_added(path: Path, file_metadata: FileMetadata) -> None:
+    logger.info(f"File added: {path}, metadata: {file_metadata}")
 
 
 if __name__ == "__main__":
