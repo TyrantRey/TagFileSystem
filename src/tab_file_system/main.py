@@ -20,8 +20,18 @@ tag_file_engine = TagFileEngine(
 
 
 @watchfile_router.on_file_added()
-def handle(path: Path, file_metadata: FileMetadata) -> None:
+def handle_added(path: Path, file_metadata: FileMetadata) -> None:
     print(f"File added: {path}, metadata: {file_metadata}")
+
+
+@watchfile_router.on_file_modified()
+def handle_modified(path: Path, file_metadata: FileMetadata) -> None:
+    print(f"File modified: {path}, metadata: {file_metadata}")
+
+
+@watchfile_router.on_file_deleted()
+def handle_deleted(path: Path, file_metadata: FileMetadata) -> None:
+    print(f"File deleted: {path}, metadata: {file_metadata}")
 
 
 if __name__ == "__main__":

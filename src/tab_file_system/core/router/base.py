@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Callable, Generic, TypeVar
 
 from pydantic import BaseModel, Field
+from tab_file_system.core.logger import logger
 from tab_file_system.core.interface.file_metadata import FileMetadata
 from tab_file_system.core.interface.filter import FileMetadataFilter
 
@@ -80,12 +81,15 @@ class EventRouter(BaseModel, Generic[T]):
         if not handlers:
             return
 
-        stat = path.stat()
-        metadata = FileMetadata(
-            file_size=stat.st_size,
-            time_added=datetime.now(UTC),
-            file_format=path.suffix,
-            file_type=path.suffix[1:] if path.suffix else None,
-        )
-        for entry in handlers:
-            entry(path, metadata)
+        try:
+            stat = path.stat()
+            metadata = FileMetadata(
+                file_size=stat.st_size,
+                time_added=datetime.now(UTC),
+                file_format=path.suffix,
+                file_type=path.suffix[1:] if path.suffix else None,
+            )
+            for entry in handlers:
+                entry(path, metadata)
+        except FileNotFoundError:
+            logger.warning(f"File not found during dispatch: {path}")

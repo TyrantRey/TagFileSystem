@@ -7,7 +7,10 @@ import watchfiles
 from watchfiles import Change, watch
 from tab_file_system.core.router.database_event import DatabaseEventRouter
 from tab_file_system.core.router.watch_event import WatchEventRouter
-from tab_file_system.core.interface.database import DatabaseEngineProtocol
+from tab_file_system.core.interface.database import (
+    DatabaseEngineProtocol,
+    DatabaseOperation,
+)
 from tab_file_system.config import FolderSetting, DatabaseSetting
 from tab_file_system.core.logger import logger
 
@@ -76,6 +79,23 @@ class TagFileEngine:
             consolidated = self._consolidate(changes)
             for raw_path, operation in consolidated.items():
                 self.watch_event_router.dispatch(operation, Path(raw_path))
+
+                match operation:
+                    case Change.added:
+                        self.logger.info(f"Insert into DB: {raw_path}")
+                        self.database_event_router.dispatch(
+                            DatabaseOperation.INSERT, Path(raw_path)
+                        )
+                    case Change.deleted:
+                        self.logger.info(f"Remove from DB: {raw_path}")
+                        self.database_event_router.dispatch(
+                            DatabaseOperation.DELETE, Path(raw_path)
+                        )
+                    case Change.modified:
+                        self.logger.info(f"Update DB: {raw_path}")
+                        self.database_event_router.dispatch(
+                            DatabaseOperation.UPDATE, Path(raw_path)
+                        )
 
     def _consolidate(self, changes: set) -> dict[str, Change]:
         consolidated: dict[str, Change] = {}

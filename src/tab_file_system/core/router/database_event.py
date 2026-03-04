@@ -1,19 +1,10 @@
 # Code by AkinoAlice@TyrantRey
 
-from typing import Callable, TypeVar, Generic, Any
+from typing import Callable
 
 from tab_file_system.core.router.base import EventRouter
 from tab_file_system.core.interface.database import DatabaseOperation
 from tab_file_system.core.interface.filter import FileMetadataFilter
-
-T = TypeVar("T")
-
-
-class DBEvent(Generic[T]):
-    op: DatabaseOperation
-    data: T
-    extra: dict[str, Any]
-
 
 class DatabaseEventRouter(EventRouter[DatabaseOperation]):
     def on_insert(self, **filters: FileMetadataFilter) -> Callable:
