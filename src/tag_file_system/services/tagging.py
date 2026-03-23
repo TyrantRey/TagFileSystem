@@ -2,8 +2,8 @@
 
 import re
 
-from tab_file_system.core.interface.tag import Tag, TagAction, TagParserOutput
-from tab_file_system.core.logger import logger
+from tag_file_system.core.interface.tag import Tag, TagAction, TagParserOutput
+from tag_file_system.core.logger import logger
 
 
 class TaggingParser:

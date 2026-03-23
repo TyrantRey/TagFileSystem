@@ -4,8 +4,8 @@ from typing import Callable
 
 from watchfiles import Change
 
-from tab_file_system.core.router.base import EventRouter
-from tab_file_system.core.interface.filter import FileMetadataFilter
+from tag_file_system.core.interface.filter import FileMetadataFilter
+from tag_file_system.core.router.base import EventRouter
 
 
 class WatchEventRouter(EventRouter[Change]):

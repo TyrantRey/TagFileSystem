@@ -48,7 +48,7 @@ pip install -r requirements.txt
 Run the main application to start monitoring your configured directories:
 
 ```bash
-python -m src.tab_file_system.main
+python -m src.tag_file_system.main
 ```
 
 The system will:
@@ -118,7 +118,7 @@ report--finance--review@@send:email=boss@company.txt
 Events are dispatched through the `WatchEventRouter` and can be handled by registering callbacks:
 
 ```python
-from src.tab_file_system.engine.watchfile_engine import watch_engine
+from src.tag_file_system.engine.watchfile_engine import watch_engine
 
 @watch_engine.on_file_event
 def handle_file_change(event):
@@ -130,10 +130,10 @@ def handle_file_change(event):
 
 See source code documentation for detailed API information:
 
-- `src.tab_file_system.engine`: File watching and event routing
-- `src.tab_file_system.tag`: Tag parsing and models
-- `src.tab_file_system.database`: SQLite backend
-- `src.tab_file_system.file_data`: File metadata models
+- `src.tag_file_system.engine`: File watching and event routing
+- `src.tag_file_system.tag`: Tag parsing and models
+- `src.tag_file_system.database`: SQLite backend
+- `src.tag_file_system.file_data`: File metadata models
 
 ## Architecture
 
@@ -153,7 +153,6 @@ TagFileSystem
 └── Configuration (setting.py)
     └── Pydantic-based settings for logging, database, folders
 ```
-
 
 ## Database Schema
 
@@ -192,6 +191,7 @@ TagFileSystem
 | `updated_at`  | INTEGER | NOT NULL, DEFAULT `unixepoch()` |
 
 > Indexes
+
 - `idx_tags_category` ON `category`
 
 ---
@@ -209,6 +209,7 @@ TagFileSystem
 | `created_at`  | INTEGER | NOT NULL, DEFAULT `unixepoch()` |
 
 > Indexes
+
 - `idx_actions_is_active` ON `is_active`
 
 ---
@@ -224,6 +225,7 @@ TagFileSystem
 **Primary Key:** (`tag_id`, `file_id`)
 
 > Indexes
+
 - `idx_tagged_files_file_id` ON `file_id`
 
 ---
@@ -253,6 +255,7 @@ TagFileSystem
 | `occurred_at` | INTEGER | NOT NULL, DEFAULT `unixepoch()`     |
 
 > Indexes
+
 - `idx_events_occurred_at` ON `occurred_at`
 - `idx_events_file_id` ON `file_id`
 - `idx_events_tag_id` ON `tag_id`
@@ -270,7 +273,7 @@ TagFileSystem
 ### Project Structure
 
 ```text
-src/tab_file_system/
+src/tag_file_system/
 ├── main.py                 # Entry point
 ├── setting.py              # Configuration classes
 ├── engine/                 # File watching logic
@@ -286,11 +289,11 @@ src/tab_file_system/
 - **Pydantic**: Data validation and configuration management
 - **watchfiles**: Efficient file system monitoring
 - **SQLite3**: Built-in database backend
-- **Typer**: CLI framework (foundation for future expansion)
+- **Typer**: CLI framework (foundation for future expansion)\
 
 ### Running in Development
 
 ```bash
 # Watch files with debug logging
-LOGGING_LEVEL=DEBUG python -m src.tab_file_system.main
+LOGGING_LEVEL=DEBUG python -m src.tag_file_system.main
 ```

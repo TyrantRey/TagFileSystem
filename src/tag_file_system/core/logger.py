@@ -2,7 +2,8 @@
 
 import logging
 from sys import stdout
-from tab_file_system.config import LoggingSetting
+
+from tag_file_system.config import LoggingSetting
 
 logging_setting = LoggingSetting()
 logger = logging.getLogger(name=__name__)

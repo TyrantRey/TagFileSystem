@@ -2,12 +2,12 @@
 
 from pathlib import Path
 
-from tab_file_system.core.router.database_event import database_event_router
-from tab_file_system.core.router.watch_event import watchfile_router
-from tab_file_system.services.engine import TagFileEngine
-from tab_file_system.config import DatabaseSetting, FolderSetting
-from tab_file_system.core.interface.file_metadata import FileMetadata
-from tab_file_system.database.sqlite import SQLiteBackend
+from tag_file_system.config import DatabaseSetting, FolderSetting
+from tag_file_system.core.interface.file_metadata import FileMetadata
+from tag_file_system.core.router.database_event import database_event_router
+from tag_file_system.core.router.watch_event import watchfile_router
+from tag_file_system.database.sqlite import SQLiteBackend
+from tag_file_system.services.engine import TagFileEngine
 
 database_setting = DatabaseSetting()
 folder_setting = FolderSetting()

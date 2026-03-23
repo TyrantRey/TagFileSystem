@@ -1,20 +1,18 @@
 [project]
-name = "tab_file_system"
+name = "tag_file_system"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "pydantic>=2.12.5",
-    "pydantic-settings>=2.12.0",
-    "typer>=0.21.1",
-    "watchfiles>=1.1.1",
+  "pydantic>=2.12.5",
+  "pydantic-settings>=2.12.0",
+  "typer>=0.21.1",
+  "watchfiles>=1.1.1",
 ]
 
 [dependency-groups]
-dev = [
-    "ty>=0.0.15",
-]
+dev = ["ty>=0.0.15"]
 
 [build-system]
 requires = ["uv_build>=0.10.7"]

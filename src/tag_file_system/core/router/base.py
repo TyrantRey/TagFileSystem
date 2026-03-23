@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Callable, Generic, TypeVar
 
 from pydantic import BaseModel, Field
-from tab_file_system.core.logger import logger
-from tab_file_system.core.interface.file_metadata import FileMetadata
-from tab_file_system.core.interface.filter import FileMetadataFilter
+
+from tag_file_system.core.interface.file_metadata import FileMetadata
+from tag_file_system.core.interface.filter import FileMetadataFilter
+from tag_file_system.core.logger import logger
 
 EventFilter = Callable[[Path, FileMetadata], bool]
 T = TypeVar("T")

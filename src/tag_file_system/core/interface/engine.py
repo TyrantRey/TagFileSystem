@@ -1,7 +1,8 @@
 # Code by AkinoAlice@TyrantRey
 
 from watchfiles import Change
-from tab_file_system.core.interface.database import DatabaseOperation
+
+from tag_file_system.core.interface.database import DatabaseOperation
 
 type AllowedOperation = DatabaseOperation | Change
 
