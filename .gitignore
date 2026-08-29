@@ -13,8 +13,10 @@ wheels/
 .env
 *.log
 *.sqlite
-**test**
 
 **.db**
 
 .vscode/
+.pytest_cache/
+# Runtime data dir created by the watcher (default FOLDER_ROOT_DIR); not the package under src/
+/tag_file_system/
