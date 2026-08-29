@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 TagFileSystem watches a directory with `watchfiles`, routes file-change events to decorator-registered handlers, parses tags/actions out of filenames (`name--tag1--tag2@@action:key=val.ext`), and persists file metadata to SQLite. Python 3.12, managed with `uv` (src layout, `uv_build` backend). Every source file starts with `# Code by AkinoAlice@TyrantRey`.
 
-**The README is partially stale.** Trust the code over the README for: the package layout (README lists `engine/`, `event/`, `tag/`, `file_data/`, `setting.py` — none exist), the run command, env-var names, the Python version (README says 3.14+; it's 3.12), and the DB schema (README documents `actions`/`tag_actions` tables that are not created by the code).
+**Target design vs. current code.** `DESIGN.md` is the approved v1 design (2026-08-30): git-like `.tfs/` root, `@@func__arg` directory-scoped functions, add-ons in `script/`, run/trace/problem tables, a `tfs` CLI and daemon. **None of it is implemented yet.** Read `DESIGN.md` before implementing any feature or changing the name grammar, schema, configuration, or CLI — it wins over this file for target behaviour; this file describes the code as it is and must be updated as each part of the design lands. `README.md` documents current behaviour and points at `DESIGN.md`.
 
 ## Commands
 
@@ -19,13 +19,13 @@ uv run python -m tag_file_system.config   # print resolved LoggingSetting (quick
 ```
 
 - Always run from the repo root: every configured path (`system.db`, `tag_file_system.log`, `./tag_file_system/files`) is relative to CWD, and the settings validators reject absolute paths.
-- Do **not** use the README's `python -m src.tag_file_system.main` — imports are `from tag_file_system...`, so the `src.` prefix breaks.
+- Run with `python -m tag_file_system.main`, never with a `src.` prefix — imports are `from tag_file_system...`, so `src.tag_file_system.main` breaks.
 - Linting/formatting is configured for Trunk (`.trunk/trunk.yaml`: ruff `B,D3,E,F` with `E501` ignored, black, isort profile=black, bandit, markdownlint, prettier). The `trunk` CLI is not installed on this machine; if it is available, use `trunk check` / `trunk fmt`.
 - Tests live in `tests/` (pytest is a dev dependency). `tests/helpers.py` has `fetch` / `metadata_of` / `tag_of`, which assert-narrow `Optional` query results so `ty check tests` stays clean.
 
 ## Configuration
 
-Three `pydantic-settings` classes in `src/tag_file_system/config.py`, each reading `.env` (no `.env` is committed) with a prefix. Actual env-var names (the README's are wrong):
+Three `pydantic-settings` classes in `src/tag_file_system/config.py`, each reading `.env` (no `.env` is committed) with a prefix. Env-var names:
 
 | Class            | Prefix      | Fields (defaults)                                                                 |
 | ---------------- | ----------- | --------------------------------------------------------------------------------- |
