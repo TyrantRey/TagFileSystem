@@ -2,6 +2,7 @@
 
 from typing import Callable
 
+from pydantic import Field
 from watchfiles import Change
 
 from tag_file_system.core.interface.filter import FileMetadataFilter
@@ -9,6 +10,8 @@ from tag_file_system.core.router.base import EventRouter
 
 
 class WatchEventRouter(EventRouter[Change]):
+    allow_missing: set[Change] = Field(default_factory=lambda: {Change.deleted})
+
     def on_file_added(self, **filters: FileMetadataFilter) -> Callable:
         return self.register(Change.added, **filters)
 

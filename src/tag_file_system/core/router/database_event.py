@@ -2,12 +2,18 @@
 
 from typing import Callable
 
+from pydantic import Field
+
 from tag_file_system.core.interface.database import DatabaseOperation
 from tag_file_system.core.interface.filter import FileMetadataFilter
 from tag_file_system.core.router.base import EventRouter
 
 
 class DatabaseEventRouter(EventRouter[DatabaseOperation]):
+    allow_missing: set[DatabaseOperation] = Field(
+        default_factory=lambda: {DatabaseOperation.DELETE}
+    )
+
     def on_insert(self, **filters: FileMetadataFilter) -> Callable:
         return self.register(DatabaseOperation.INSERT, **filters)
 

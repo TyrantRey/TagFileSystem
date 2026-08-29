@@ -32,6 +32,9 @@ class EventRouter(BaseModel, Generic[T]):
     model_config = {"arbitrary_types_allowed": True}
 
     handlers: dict[T, list[HandlerEntry]] = Field(default_factory=dict)
+    # Events that must still be dispatched when the path no longer exists on
+    # disk (deletions). Metadata is then built from the path alone.
+    allow_missing: set[T] = Field(default_factory=set)
 
     def _build_filters(
         self, file_object: FileMetadataFilter | None
@@ -77,20 +80,32 @@ class EventRouter(BaseModel, Generic[T]):
 
         return decorator
 
+    @staticmethod
+    def _build_metadata(path: Path, file_size: int) -> FileMetadata:
+        return FileMetadata(
+            file_size=file_size,
+            time_added=datetime.now(UTC),
+            file_format=path.suffix,
+            file_type=path.suffix[1:] if path.suffix else None,
+        )
+
     def dispatch(self, operation: T, path: Path) -> None:
         handlers = self.handlers.get(operation, [])
         if not handlers:
             return
 
         try:
-            stat = path.stat()
-            metadata = FileMetadata(
-                file_size=stat.st_size,
-                time_added=datetime.now(UTC),
-                file_format=path.suffix,
-                file_type=path.suffix[1:] if path.suffix else None,
-            )
-            for entry in handlers:
-                entry(path, metadata)
+            metadata = self._build_metadata(path, path.stat().st_size)
         except FileNotFoundError:
-            logger.warning(f"File not found during dispatch: {path}")
+            if operation not in self.allow_missing:
+                logger.warning(f"File not found during dispatch: {path}")
+                return
+            metadata = self._build_metadata(path, 0)
+
+        for entry in handlers:
+            try:
+                entry(path, metadata)
+            except Exception:
+                logger.exception(
+                    f"Handler {getattr(entry.func, '__qualname__', entry.func)!r} failed for {operation} on {path}"
+                )
