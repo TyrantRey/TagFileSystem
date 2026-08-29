@@ -7,16 +7,22 @@ from tag_file_system.core.interface.file_metadata import FileMetadata
 from tag_file_system.core.router.database_event import database_event_router
 from tag_file_system.core.router.watch_event import watchfile_router
 from tag_file_system.database.sqlite import SQLiteBackend
+from tag_file_system.pipeline.database import register_database_pipeline
 from tag_file_system.services.engine import TagFileEngine
 
 database_setting = DatabaseSetting()
 folder_setting = FolderSetting()
 
+database_engine = SQLiteBackend()
+
 tag_file_engine = TagFileEngine(
     watch_event_router=watchfile_router,
     database_event_router=database_event_router,
-    database_engine=SQLiteBackend(),
+    database_engine=database_engine,
 )
+
+# Persist INSERT / UPDATE / DELETE events (and filename tags) to SQLite.
+register_database_pipeline(database_event_router, database_engine)
 
 
 @watchfile_router.on_file_added()
