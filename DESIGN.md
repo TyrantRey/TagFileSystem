@@ -80,8 +80,23 @@ marker  := '@@' func ( '__' arg )*        # function slug + positional args
 - `tag` is normalized as today: lowercase, non-`[\w-]` stripped, hyphens
   collapsed. The old "leading `category:` is dropped" rule goes away because
   `:` is now a parse error.
-- Any of `: / \ < > | ? * "` inside a marker → parse error → P2 `warn`, marker
-  skipped, the rest of the name still parses.
+- Every marker value is Unicode **NFC**-normalized first, so a name typed on
+  macOS (NFD) and the same name typed on Windows yield one tag / one call.
+- Any of `: / \ < > | ? * "` or a line break inside a marker → parse error →
+  P2 `warn`, marker skipped, the rest of the name still parses.
+- **Filename extension.** For a file, the extension (what follows the last
+  `.`, as `Path.suffix`) is dropped before parsing — *unless* that text
+  contains marker syntax (`--`, `@@`, `__`), in which case it is part of a
+  marker and the whole name is parsed. So `img--raw.jpg` → tag `raw`;
+  `v1.2--beta` → tag `beta`; a *file* named `@@make_copy__.jpg__photos`
+  parses like the directory. A marker value that itself ends in a dotted part
+  (`photo@@resize__1.5`) is cut at the dot: put markers before the extension.
+  Only the *last* dotted part is an extension, so with multi-part extensions
+  keep the markers on the label: `archive--old.tar.gz` yields tag `oldtar`,
+  `archive--old.tgz` or `old--archive.tar.gz` yield what you meant.
+- `parse_path` only accepts root-relative paths: anything anchored (a leading
+  `/` or `\`, a drive, a UNC prefix) or containing `..` is an error, not a
+  problem — it is a caller bug, never a user's filename.
 
 Example:
 

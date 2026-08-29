@@ -30,7 +30,7 @@ def make_engine(backend: SQLiteBackend, tmp_path: Path, files_dir: Path):
 
 def test_added_file_is_indexed_with_tags(backend: SQLiteBackend, tmp_path, files_dir):
     engine = make_engine(backend, tmp_path, files_dir)
-    path = files_dir / "report--Finance--q3@@archive:days=30.pdf"
+    path = files_dir / "report--Finance--q3@@archive__30.pdf"
     path.write_bytes(b"pdf-bytes")
 
     engine.process_changes({(Change.added, str(path))})
