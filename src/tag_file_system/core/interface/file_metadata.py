@@ -11,6 +11,7 @@ class FileMetadata(BaseModel):
     time_added: datetime
     file_format: str | None
     file_type: str | None
+    mime_type: str | None = None
 
 
 class Tag(BaseModel):
@@ -22,5 +23,7 @@ class Tag(BaseModel):
 class TaggedFile(BaseModel):
     file_hash: str
     original_path: Path
+    file_id: str | None = None
+    status: str = "active"
     tags: list[Tag] = []
     metadata: FileMetadata | None = None

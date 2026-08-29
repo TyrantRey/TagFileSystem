@@ -7,7 +7,7 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from tag_file_system.core.interface.file_metadata import FileMetadata, Tag
+from tag_file_system.core.interface.file_metadata import Tag, TaggedFile
 
 
 class OperationResultEnum(StrEnum):
@@ -29,51 +29,88 @@ class SQLOperationType(StrEnum):
     Event = "Event"
 
 
+class FileStatus(StrEnum):
+    ACTIVE = "active"
+    DELETED = "deleted"
+    ARCHIVED = "archived"
+
+
 class SQLResult(BaseModel):
+    """Outcome of one backend operation.
+
+    ``operation_id`` is a UUID generated for the call. When the operation
+    records exactly one ``events`` row, that row reuses the same id.
+    ``record_id`` is the id of the affected ``files`` / ``tags`` row when one
+    could be resolved.
+    """
+
     operation_id: str
     status: OperationResultEnum
     record_id: str | None = None
     type: SQLOperationType
 
 
-# class InsertResult(SQLResult):
-#     id: str
-#     path: Path
-#     hash: str
-#     size: int
-#     format: str
-#     mime_type: str
-
-
 class DatabaseEngineProtocol(Protocol):
+    def init_database(self, database_path: Path) -> bool: ...
+
+    def close(self) -> None: ...
+
+    # -- files ---------------------------------------------------------------
+
     def insert(
         self,
         filename: str,
         file_path: Path,
         file_hash: str,
         file_size: int,
-        file_format: str,
-        file_mime_type: str,
+        file_format: str | None = None,
+        file_mime_type: str | None = None,
     ) -> SQLResult: ...
 
-    def update(self, path: str) -> None: ...
+    def update(
+        self,
+        file_path: Path,
+        file_hash: str,
+        file_size: int,
+        file_format: str | None = None,
+        file_mime_type: str | None = None,
+    ) -> SQLResult: ...
 
-    def delete(self, path: str) -> None: ...
+    def delete(self, file_path: Path) -> SQLResult: ...
 
-    def modify(self, path: str) -> None: ...
+    def modify(self, file_path: Path, new_path: Path) -> SQLResult: ...
 
-    def init_database(self, database_path: Path) -> bool: ...
+    # -- tags ----------------------------------------------------------------
 
-    def query_tag(self, tag_name: str | None, tag_id: int | None) -> Tag | None: ...
+    def upsert_tag(
+        self,
+        name: str,
+        category: str | None = None,
+        description: str | None = None,
+    ) -> SQLResult: ...
+
+    def set_file_tags(self, file_path: Path, tag_names: list[str]) -> SQLResult: ...
+
+    # -- queries -------------------------------------------------------------
+
+    def query_tag(
+        self, tag_name: str | None = None, tag_id: str | None = None
+    ) -> Tag | None: ...
+
+    def query_file(
+        self, file_path: Path, include_deleted: bool = False
+    ) -> TaggedFile | None: ...
 
     def query_files(
         self,
-        tags: list[Tag] | None = None,
-        tag_ids: list[int] | None = None,
+        tags: list[str] | None = None,
+        tag_ids: list[str] | None = None,
         filename: str | None = None,
         file_hash: str | None = None,
         file_format: str | None = None,
         file_type: str | None = None,
+        mime_type: str | None = None,
         file_size_range: tuple[int, int] | None = None,
         file_added_range: tuple[datetime, datetime] | None = None,
-    ) -> list[FileMetadata] | None: ...
+        include_deleted: bool = False,
+    ) -> list[TaggedFile]: ...
