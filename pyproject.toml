@@ -12,7 +12,10 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["ty>=0.0.15"]
+dev = [
+    "pytest>=9.1.1",
+    "ty>=0.0.15",
+]
 
 [build-system]
 requires = ["uv_build>=0.10.7"]
