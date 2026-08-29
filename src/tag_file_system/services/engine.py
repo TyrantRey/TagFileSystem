@@ -76,27 +76,30 @@ class TagFileEngine:
     def start(self):
         self.logger.info("Starting TagFileEngine")
         self.ensure_directories()
-        for changes in watch(self.files_dir.parent):
-            consolidated = self._consolidate(changes)
-            for raw_path, operation in consolidated.items():
-                self.watch_event_router.dispatch(operation, Path(raw_path))
+        try:
+            for changes in watch(self.files_dir.parent):
+                self.process_changes(changes)
+        except KeyboardInterrupt:
+            self.logger.info("Stopping TagFileEngine")
+        finally:
+            self.database_engine.close()
 
-                match operation:
-                    case Change.added:
-                        self.logger.info(f"Insert into DB: {raw_path}")
-                        self.database_event_router.dispatch(
-                            DatabaseOperation.INSERT, Path(raw_path)
-                        )
-                    case Change.deleted:
-                        self.logger.info(f"Remove from DB: {raw_path}")
-                        self.database_event_router.dispatch(
-                            DatabaseOperation.DELETE, Path(raw_path)
-                        )
-                    case Change.modified:
-                        self.logger.info(f"Update DB: {raw_path}")
-                        self.database_event_router.dispatch(
-                            DatabaseOperation.UPDATE, Path(raw_path)
-                        )
+    def process_changes(self, changes: set) -> None:
+        consolidated = self._consolidate(changes)
+        for raw_path, operation in consolidated.items():
+            path = Path(raw_path)
+            self.watch_event_router.dispatch(operation, path)
+
+            match operation:
+                case Change.added:
+                    self.logger.info(f"Insert into DB: {raw_path}")
+                    self.database_event_router.dispatch(DatabaseOperation.INSERT, path)
+                case Change.deleted:
+                    self.logger.info(f"Remove from DB: {raw_path}")
+                    self.database_event_router.dispatch(DatabaseOperation.DELETE, path)
+                case Change.modified:
+                    self.logger.info(f"Update DB: {raw_path}")
+                    self.database_event_router.dispatch(DatabaseOperation.UPDATE, path)
 
     def _consolidate(self, changes: set) -> dict[str, Change]:
         consolidated: dict[str, Change] = {}
