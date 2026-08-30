@@ -46,9 +46,19 @@ class Indexer:
         self.backend = backend
         self.parser = parser if parser is not None else TaggingParser()
 
-    def index(self, path: Path) -> Indexed | None:
+    def index(
+        self,
+        path: Path,
+        previous_key: PurePosixPath | str | None = None,
+        known_hash: str | None = None,
+    ) -> Indexed | None:
         """Insert or refresh the row for ``path``. ``None`` when the path is
-        not a file under the root."""
+        not a file under the root.
+
+        ``previous_key`` is the key the row had before a move (its old name
+        spelled the tags that are now stale); ``known_hash`` skips hashing
+        when the caller already did.
+        """
         abs_path = Path(path)
         if not abs_path.is_absolute():
             abs_path = self.root.absolute(PurePosixPath(abs_path.as_posix()))
@@ -67,7 +77,12 @@ class Indexer:
             and previous.metadata.mtime_ns == stat.st_mtime_ns
             and previous.metadata.file_size == stat.st_size
         )
-        file_hash = previous.file_hash if reuse and previous else compute_file_hash(abs_path)
+        if reuse and previous:
+            file_hash = previous.file_hash
+        elif known_hash is not None:
+            file_hash = known_hash
+        else:
+            file_hash = compute_file_hash(abs_path)
         details = {
             "file_hash": file_hash,
             "file_size": stat.st_size,
@@ -86,7 +101,8 @@ class Indexer:
         # its name spelled) survive a re-index.
         extra: list[str] = []
         if previous is not None and previous.status != "deleted":
-            spelled = set(self.parser.parse_path(previous.path).tag_names)
+            old_key = PurePosixPath(previous_key) if previous_key is not None else previous.path
+            spelled = set(self.parser.parse_path(old_key).tag_names)
             extra = [t.name for t in previous.tags if t.name not in spelled]
         self.backend.set_file_tags(key, [*parsed.tag_names, *extra])
         file = self.backend.query_file(key)

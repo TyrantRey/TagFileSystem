@@ -226,6 +226,19 @@ chain stops.
   reconciled (new rows), the old rows are soft-deleted, and because their
   hashes were just seen, their `removed` handlers fire as moves, not
   deletions.
+- **Reconciliation** (at `start`, and for every added directory) matches a
+  vanished row against the freshly indexed rows by hash before soft-deleting
+  it, so a file moved while the daemon was down is a move too. Two files with
+  identical content make the match arbitrary — a consequence of keying by
+  content (§6.1). A `deleted` event for a path that still exists (an editor's
+  atomic save) is treated as `added`: the disk decides.
+- **Watch filter**: the daemon watches everything under the root except
+  `.tfs/` — including names watchfiles hides by default (`.git`,
+  `node_modules`, `*~`); anything reconcile would index, the watcher reports.
+- **Failure**: an unreadable file is `file.unreadable` (P1) and the batch
+  goes on; a batch that raises is `batch.failed` (P0) and the loop goes on;
+  the loop ending for any other reason is `daemon.died` (P0), replayed to
+  handlers at the next start.
 - **Symlinks**: paths are resolved before they are keyed, so a symlink inside
   the root is the file it points to (one file, one key); a link whose target
   is outside the root is `OutsideRoot` and ignored by the watcher.
