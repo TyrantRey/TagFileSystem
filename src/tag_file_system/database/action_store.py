@@ -364,7 +364,7 @@ class ActionStore:
             clauses.append("r.action_name = ?")
             params.append(action_name)
         if status is not None:
-            statuses = [status] if isinstance(status, RunStatus) else list(status)
+            statuses = [status] if isinstance(status, (RunStatus, str)) else list(status)
             clauses.append(f"r.status IN ({_placeholders(len(statuses))})")
             params.extend(RunStatus(s).value for s in statuses)
         if since is not None:

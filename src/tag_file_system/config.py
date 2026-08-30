@@ -1,22 +1,12 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Configuration.
-
-``Config`` is the ``.tfs/config.toml`` model of DESIGN.md §2. The three
-``pydantic-settings`` classes at the bottom are the legacy ``.env`` settings
-still used by ``services/engine.py`` and ``core/logger.py``; they go away when
-the engine slice lands.
-"""
+"""``Config``: the ``.tfs/config.toml`` model of DESIGN.md §2."""
 
 import ipaddress
 import tomllib
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from pydantic_settings import (
-    BaseSettings,
-    SettingsConfigDict,
-)
 
 from tag_file_system.core.paths import has_parent_reference, is_anchored
 
@@ -183,71 +173,6 @@ def _toml_key(key: str) -> str:
 
 def _toml_num(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else repr(float(value))
-
-
-# --------------------------------------------------------------- legacy .env
-
-
-def settings_factory(env_prefix: str = "") -> SettingsConfigDict:
-    return SettingsConfigDict(
-        env_prefix=env_prefix,
-        case_sensitive=False,
-        env_file=".env",
-        env_file_encoding="utf-8",
-        env_ignore_empty=True,
-        extra="ignore",
-    )
-
-
-class LoggingSetting(BaseSettings):
-    log_level: str = "INFO"
-    log_file: Path = Path("tag_file_system.log")
-    filemode: str = "w+"
-
-    @field_validator("log_level")
-    @classmethod
-    def validate_log_level(cls, v: str) -> str:
-        level = v.strip().upper()
-        if level not in LOG_LEVELS:
-            raise ValueError(f"Invalid log level: {v}. Must be one of {LOG_LEVELS}")
-        return level
-
-    @field_validator("log_file")
-    @classmethod
-    def validate_folder_path(cls, v: Path) -> Path:
-        if v.is_absolute():
-            raise ValueError(f"Path must not be absolute: {v}")
-        return v
-
-    model_config = settings_factory(env_prefix="LOGGING_")
-
-
-class DatabaseSetting(BaseSettings):
-    db_file: Path = Path("system.db")
-
-    @field_validator("db_file")
-    @classmethod
-    def validate_folder_path(cls, v: Path) -> Path:
-        if v.is_absolute():
-            raise ValueError(f"Path must not be absolute: {v}")
-        return v
-
-    model_config = settings_factory(env_prefix="DATABASE_")
-
-
-class FolderSetting(BaseSettings):
-    root_dir: Path = Path("./tag_file_system")
-    files_dir: Path = root_dir / "files"
-    tags_dir: Path = root_dir / "tags"
-
-    @field_validator("files_dir", "tags_dir")
-    @classmethod
-    def validate_folder_path(cls, v: Path) -> Path:
-        if v.is_absolute():
-            raise ValueError(f"Path must not be absolute: {v}")
-        return v
-
-    model_config = settings_factory(env_prefix="FOLDER_")
 
 
 if __name__ == "__main__":
