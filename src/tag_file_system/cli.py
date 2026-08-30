@@ -183,7 +183,7 @@ def list_addons(
             continue
         for hook, schema in signature.items():
             params = ", ".join(
-                f"{name}: {spec.get('type', spec.get('x-tfs-path', 'any'))}"
+                f"{name}: {spec.get('x-tfs-path') or spec.get('type', 'any')}"
                 + (f" = {spec['default']!r}" if "default" in spec else "")
                 for name, spec in schema.get("properties", {}).items()
             )

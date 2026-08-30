@@ -96,6 +96,9 @@ def notify(problem, ctx):                       # every P1 and P0
 - `ctx` offers `copy/move/write/delete/emit`, `record/log`, `spawn/done` for
   background work, `tag/untag`, `query`, `problem`, `retry`, `resolve`.
 - Scripts are hot-reloaded when they change; helpers are `_name.py`.
+- [`examples/script/`](examples/script) holds `make_copy.py` (copy to a
+  remote, drop the copy when the source leaves) and `notify.py` (a problem
+  handler): copy them into `script/` to try the daemon.
 - A run happens once per `(file content, add-on, hook, args)`: editing a
   script does not re-run old files, renaming an `@@` directory does.
 
