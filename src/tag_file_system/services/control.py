@@ -8,7 +8,9 @@ the later API/MCP: ``/health``, ``/stop``, ``/reload``, ``/actions``,
 ``/files``. ``ControlClient`` is what the ``tfs`` CLI talks to.
 """
 
+import ipaddress
 import json
+import socket
 import threading
 import urllib.error
 import urllib.parse
@@ -16,11 +18,13 @@ import urllib.request
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from tag_file_system.core.interface.action import RunRecord
 from tag_file_system.core.interface.file_metadata import TaggedFile
 from tag_file_system.core.logger import logger
+from tag_file_system.core.paths import has_parent_reference, is_anchored, posix_key
 
 if TYPE_CHECKING:  # pragma: no cover
     from tag_file_system.services.daemon import Daemon
@@ -36,10 +40,51 @@ class ControlError(Exception):
 
 
 class ControlUnavailable(ControlError):
-    """No daemon answers on the configured address."""
+    """No daemon answers on the configured address (or the root's config /
+    token cannot be read, so none could be reached)."""
 
     def __init__(self, message: str) -> None:
         super().__init__(0, message)
+
+    def __str__(self) -> str:
+        return self.message
+
+
+class BadRequest(ValueError):
+    """A request parameter the server rejects (HTTP 400)."""
+
+
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off", ""}
+
+
+def parse_flag(name: str, value: str | None) -> bool:
+    if value is None:
+        return False
+    text = value.strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise BadRequest(f"{name} must be true or false, got {value!r}")
+
+
+def validate_prefix(prefix: str | None) -> str | None:
+    """A ``prefix`` must be a root-relative directory key."""
+    if prefix is None:
+        return None
+    text = prefix.strip()
+    if not text or text in (".", "./"):
+        raise BadRequest("prefix must name a directory below the root")
+    if is_anchored(text) or has_parent_reference(Path(text)):
+        raise BadRequest(f"prefix must be a root-relative directory, got {prefix!r}")
+    try:
+        key = posix_key(text)
+    except ValueError as e:
+        raise BadRequest(f"prefix: {e}") from None
+    if key == ".":
+        raise BadRequest("prefix must name a directory below the root")
+    return key
 
 
 def _jsonable(value: Any) -> Any:
@@ -73,6 +118,15 @@ def file_payload(file: TaggedFile, runs: list[RunRecord] | None = None) -> dict[
 # ------------------------------------------------------------------ server
 
 
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, bind: str, port: int, handler: type[BaseHTTPRequestHandler]) -> None:
+        if ipaddress.ip_address(bind).version == 6:
+            self.address_family = socket.AF_INET6
+        super().__init__((bind, port), handler)
+
+
 class ControlServer:
     def __init__(self, daemon: "Daemon", bind: str, port: int, token: str) -> None:
         self.daemon = daemon
@@ -98,14 +152,23 @@ class ControlServer:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+                # http.server's own errors (414, 400, 501) as JSON, never HTML.
+                try:
+                    self._send(HTTPStatus(code), {"error": message or HTTPStatus(code).phrase})
+                except Exception:  # pragma: no cover - the socket is gone
+                    pass
+
             def _route(self, method: str) -> None:
                 if not self._authorized():
                     self._send(HTTPStatus.UNAUTHORIZED, {"error": "missing or wrong token"})
                     return
                 parsed = urllib.parse.urlsplit(self.path)
-                query = urllib.parse.parse_qs(parsed.query)
+                query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
                 try:
                     status, body = server_ref.dispatch(method, parsed.path, query)
+                except BadRequest as e:
+                    status, body = HTTPStatus.BAD_REQUEST, {"error": str(e)}
                 except Exception as e:  # never let a handler kill the server
                     server_ref.logger.exception("control request failed")
                     status, body = HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(e).__name__}: {e}"}
@@ -117,8 +180,22 @@ class ControlServer:
             def do_POST(self) -> None:  # noqa: N802
                 self._route("POST")
 
-        self._server = ThreadingHTTPServer((bind, port), Handler)
-        self._server.daemon_threads = True
+            def do_PUT(self) -> None:  # noqa: N802
+                self._route("PUT")
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                self._route("DELETE")
+
+            def do_PATCH(self) -> None:  # noqa: N802
+                self._route("PATCH")
+
+            def do_HEAD(self) -> None:  # noqa: N802
+                self._route("HEAD")
+
+            def do_OPTIONS(self) -> None:  # noqa: N802
+                self._route("OPTIONS")
+
+        self._server = _Server(bind, port, Handler)
         self._thread: threading.Thread | None = None
 
     @property
@@ -170,19 +247,22 @@ class ControlServer:
         return self.daemon.reload()
 
     def _actions(self, query: dict[str, list[str]]) -> dict[str, Any]:
-        return {"actions": self.daemon.describe_addons()}
+        return {"actions": self.daemon.describe_addons(), "problems": self.daemon.load_problems()}
 
     def _files(self, query: dict[str, list[str]]) -> dict[str, Any]:
         first = {k: v[0] for k, v in query.items() if v}
+        tags = query.get("tag") or []
+        if any(not t.strip() for t in tags):
+            raise BadRequest("tag cannot be blank")
         files = self.daemon.backend.query_files(
-            tags=query.get("tag") or None,
+            tags=[t.strip() for t in tags] or None,
             filename=first.get("name") or None,
             file_format=first.get("format") or None,
             mime_type=first.get("mime") or None,
-            include_deleted=first.get("deleted", "") in ("1", "true", "yes"),
-            path_prefix=first.get("prefix") or None,
+            include_deleted=parse_flag("deleted", first.get("deleted")),
+            path_prefix=validate_prefix(first.get("prefix") or None),
         )
-        with_runs = first.get("runs", "") in ("1", "true", "yes")
+        with_runs = parse_flag("runs", first.get("runs"))
         payload = [
             file_payload(f, self.daemon.store.query_runs(file_path=f.path) if with_runs else None)
             for f in files
@@ -195,7 +275,11 @@ class ControlServer:
 
 class ControlClient:
     def __init__(self, host: str, port: int, token: str, timeout: float = 5.0) -> None:
-        connect_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+        connect_host = host
+        if host == "0.0.0.0":
+            connect_host = "127.0.0.1"
+        elif host == "::":
+            connect_host = "::1"
         if ":" in connect_host and not connect_host.startswith("["):
             connect_host = f"[{connect_host}]"
         self.base = f"http://{connect_host}:{port}"
@@ -239,8 +323,9 @@ class ControlClient:
     def reload(self) -> dict[str, Any]:
         return self._call("POST", "/reload")
 
-    def actions(self) -> list[dict[str, Any]]:
-        return self._call("GET", "/actions")["actions"]
+    def actions(self) -> dict[str, Any]:
+        """``{"actions": [...], "problems": [...]}``."""
+        return self._call("GET", "/actions")
 
     def files(
         self,

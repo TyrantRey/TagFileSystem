@@ -37,9 +37,11 @@ anything:
 - `init` refuses if any ancestor directory already contains `.tfs/`.
 - The CLI locates the root by walking up from the CWD, like git.
 - Only one daemon may run per root. `.tfs/lock` holds pid + hostname; a second
-  `start` refuses. A stale lock (dead pid / old age) is overridable with
-  `--force`. Two watchers on one root over SMB would corrupt the DB — this is
-  the guardrail.
+  `start` refuses (`LockHeld`). A lock that is *stale* — written on this host
+  by a pid that is gone, or on another host longer than six hours ago — is
+  taken over automatically with a P2 `lock.stale`; `--force` takes over a lock
+  that looks live (P0 `lock.overridden`). Two watchers on one root over SMB
+  would corrupt the DB — this is the guardrail.
 
 ### `config.toml`
 
@@ -440,7 +442,16 @@ Exactly six commands (Typer):
 - The CLI is **client-first**: it talks to the daemon; if the daemon is down and
   the DB is on a local disk it reads the DB directly; over a network mount with
   no daemon it refuses with a clear message (WAL over SMB/NFS is unsafe).
-- `stop` falls back to the pid in `.tfs/lock` when the channel is unresponsive.
+- `stop` falls back to the pid in `.tfs/lock` when the channel is unresponsive
+  — only when the lock was written on *this* host (a pid means nothing across
+  machines). On POSIX that is a `SIGTERM` (graceful); on Windows a detached
+  daemon has no console to receive a break, so it is killed and the next
+  `start` recovers its runs (`stop` says so).
+- `query --mime` takes an exact type or a family (`image/*`); `--under`
+  takes a root-relative directory; blank tags and escaping prefixes are
+  usage errors (HTTP 400 on the channel). `list` shows the load problems the
+  daemon recorded for `script/` (or, without a daemon, the ones it hits
+  loading `script/` itself).
 - Docker: root mounted as a volume, `bind = "0.0.0.0"` in the container's
   config, port mapped; the token keeps LAN neighbours out.
 

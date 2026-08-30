@@ -73,9 +73,11 @@ def test_health_actions_and_files(root: Root, daemon: Daemon, client: ControlCli
     assert health["addons"] == ["copy"] and health["in_flight"] == []
     assert Path(health["root"]) == root.path
 
-    (action,) = client.actions()
+    payload = client.actions()
+    (action,) = payload["actions"]
     assert action["name"] == "copy" and action["hooks"] == ["added"]
     assert action["signature"]["added"]["properties"]["suffix"]["default"] == ".bak"
+    assert payload["problems"] == []
 
     files = client.files(tags=["photo"])
     assert [f["path"] for f in files] == ["@@copy/a--photo.txt"]
@@ -84,6 +86,63 @@ def test_health_actions_and_files(root: Root, daemon: Daemon, client: ControlCli
     assert with_runs[0]["runs"][0]["status"] == "ok"
     assert client.files(tags=["nope"]) == []
     assert client.files(name="A--", format=".txt")[0]["path"] == "@@copy/a--photo.txt"
+    assert client.files(mime="text/*")[0]["path"] == "@@copy/a--photo.txt"
+    assert client.files(mime="image/*") == []
+
+
+def test_load_problems_are_reported_by_the_daemon(root: Root, daemon: Daemon, client: ControlClient):
+    (root.script_dir / "Bad.py").write_text("x = 1\n")
+    (root.script_dir / "broken.py").write_text("def run(:\n")
+    client.reload()
+
+    kinds = sorted(p["kind"] for p in client.actions()["problems"])
+    assert kinds == ["addon.filename", "addon.import"]
+
+    (root.script_dir / "broken.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
+    client.reload()
+    assert [p["kind"] for p in client.actions()["problems"]] == ["addon.filename"]
+
+
+def test_bad_parameters_are_400(root: Root, daemon: Daemon, client: ControlClient):
+    for kwargs in (
+        {"prefix": ".."},
+        {"prefix": "."},
+        {"prefix": "C:/Users"},
+        {"tags": [""]},
+    ):
+        with pytest.raises(ControlError) as exc:
+            client.files(**kwargs)  # type: ignore[arg-type]
+        assert exc.value.status == 400, kwargs
+    config = root.load_config()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{config.daemon.port}/files?deleted=maybe",
+        headers={"Authorization": f"Bearer {root.read_token()}"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as http:
+        urllib.request.urlopen(request, timeout=5)
+    assert http.value.code == 400
+    assert daemon.backend.is_open
+
+
+def test_unsupported_methods_get_json(root: Root, daemon: Daemon):
+    config = root.load_config()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{config.daemon.port}/health",
+        method="PUT",
+        headers={"Authorization": f"Bearer {root.read_token()}"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as http:
+        urllib.request.urlopen(request, timeout=5)
+    assert http.value.code == 405
+    assert json.loads(http.value.read())["error"].startswith("PUT not allowed")
+
+
+def test_unavailable_message_has_no_status_prefix(root: Root):
+    config = root.load_config()
+    client = ControlClient(config.daemon.bind, config.daemon.port, "t", timeout=1)
+    with pytest.raises(ControlUnavailable) as exc:
+        client.health()
+    assert not str(exc.value).startswith("0:")
 
 
 def test_reload_and_stop(root: Root, daemon: Daemon, client: ControlClient):

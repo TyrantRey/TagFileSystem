@@ -109,7 +109,7 @@ def test_list_without_a_daemon_loads_scripts_directly(root: Root):
 
     as_json = json.loads(tfs("list", "--root", str(root.path), "--json").output)
     assert as_json["actions"][0]["name"] == "copy"
-    assert as_json["problems"][0][1] == "addon.filename"
+    assert as_json["problems"][0]["kind"] == "addon.filename"
 
 
 def test_list_and_query_through_the_daemon(root: Root, daemon: Daemon):
@@ -157,6 +157,87 @@ def test_stop_through_the_daemon(root: Root, daemon: Daemon):
     assert result.exit_code == 0, result.output
     assert "stopped" in result.output
     assert not root.lock_path.exists()
+
+
+def test_stop_never_signals_a_pid_from_another_host(root: Root):
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        root.lock_path.write_text(
+            json.dumps({"pid": sleeper.pid, "hostname": "some-other-nas", "created_at": time.time()})
+        )
+
+        result = tfs("stop", "--root", str(root.path))
+
+        assert result.exit_code == 1
+        assert "some-other-nas" in result.output and "stop it on that machine" in result.output
+        assert sleeper.poll() is None  # untouched
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+def test_start_detached_reports_a_child_that_dies(root: Root, daemon: Daemon):
+    result = tfs("start", "-d", "--root", str(root.path))  # a daemon already runs
+
+    assert result.exit_code == 1
+    assert "already answers" in result.output and "tfs stop" in result.output
+
+    # a child that dies for another reason (here: an address it cannot
+    # bind) is reported with its output, not as a success
+    daemon.request_stop()
+    deadline = time.time() + 10
+    while daemon.backend.is_open and time.time() < deadline:
+        time.sleep(0.05)
+    config = root.load_config()
+    Config(daemon=DaemonConfig(bind="203.0.113.1", port=config.daemon.port)).write(root.config_path)
+
+    result = tfs("start", "-d", "--root", str(root.path))
+
+    assert result.exit_code == 1
+    assert "exited with code" in result.output or "did not come up" in result.output
+    assert "control channel" in result.output
+
+
+def test_start_with_a_missing_token_is_a_clean_error(root: Root):
+    root.token_path.unlink()
+
+    result = tfs("start", "--root", str(root.path))
+
+    assert result.exit_code == 1
+    assert "token" in result.output and "Traceback" not in result.output
+    assert not root.lock_path.exists()
+
+
+def test_query_validates_its_arguments(root: Root):
+    for args in (("--under", ".."), ("--under", "."), ("--under", "C:/x"), ("-t", "")):
+        result = tfs("query", "--root", str(root.path), *args)
+        assert result.exit_code == 2, args
+        assert "Traceback" not in result.output
+
+
+def test_fallbacks_survive_a_broken_config_or_token(root: Root):
+    d = Daemon(root)
+    d.startup()
+    d.shutdown()
+    root.config_path.write_text("[daemon]\nport = 'x'\n")
+
+    assert tfs("list", "--root", str(root.path)).exit_code == 0
+    assert "@@copy/a--photo.txt" in tfs("query", "--root", str(root.path), "-t", "photo").output
+    stop = tfs("stop", "--root", str(root.path))
+    assert stop.exit_code == 1 and "no daemon is running" in stop.output
+
+    root.token_path.unlink()
+    assert tfs("list", "--root", str(root.path)).exit_code == 0
+
+
+def test_list_shows_load_problems_through_the_daemon(root: Root, daemon: Daemon):
+    (root.script_dir / "Bad.py").write_text("x = 1\n")
+    tfs("reload", "--root", str(root.path))
+
+    result = tfs("list", "--root", str(root.path))
+
+    assert "add-ons from daemon" in result.output
+    assert "[warn] addon.filename" in result.output
 
 
 def test_start_refuses_a_live_lock(root: Root):

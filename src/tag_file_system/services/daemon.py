@@ -97,6 +97,7 @@ class Daemon:
         parser: TaggingParser | None = None,
         poll_ms: int = 1000,
         control: bool = False,
+        apply_logging: bool = False,
     ) -> None:
         self.root = root
         self.config = config if config is not None else root.load_config()
@@ -105,7 +106,9 @@ class Daemon:
         self.logger = logger
         self.control_enabled = control
         self.control: ControlServer | None = None
+        self.apply_logging = apply_logging  # re-apply [logging] on reload
         self.case_insensitive = _case_insensitive(root.tfs_dir)
+        self._load_problems: dict[str, list[dict]] = {}  # script file -> problems
 
         self.backend = SQLiteBackend()
         self.backend.init_database(root.db_path, root_dir=root.path)
@@ -115,10 +118,40 @@ class Daemon:
         self.runner = ActionRunner(
             root, self.backend, self.store, self.loader, self.config, self.parser
         )
-        self.loader.report = self.runner.problem
+        self.loader.report = self._report_load_problem
         self.lock = Lock(root)
         self._stop = threading.Event()
         self.started = False
+
+    # ------------------------------------------------------- load problems
+
+    def _report_load_problem(
+        self, severity: Severity, kind: str, message: str, /, *, action_name: str | None = None
+    ) -> object:
+        """Loader problems go to the problem log like any other and are also
+        kept per script file, so ``tfs list`` can show why a script is not
+        what its author expects."""
+        first = message.split(" ", 1)[0].rstrip(":")  # loader messages lead with the file
+        if first.endswith(".py"):
+            script = first
+        else:
+            script = f"{action_name}.py" if action_name else "script/"
+        self._load_problems.setdefault(script, []).append(
+            {"severity": Severity(severity).value, "kind": kind, "message": message}
+        )
+        return self.runner.problem(severity, kind, message, action_name=action_name)
+
+    def _load(self, path: Path | None = None) -> list:
+        """Load one script (or all) and refresh its recorded problems."""
+        if path is None:
+            self._load_problems.clear()
+            return self.loader.load_all()
+        self._load_problems.pop(path.name, None)
+        addon = self.loader.load(path)
+        return [addon] if addon is not None else []
+
+    def load_problems(self) -> list[dict]:
+        return [p for problems in self._load_problems.values() for p in problems]
 
     # ------------------------------------------------------------ lifecycle
 
@@ -154,7 +187,7 @@ class Daemon:
                     self.root.read_token(),
                 )
                 self.control.start()
-            self.loader.load_all()
+            self._load()
             self.runner.replay_undelivered()
             self.reconcile()
         except BaseException:
@@ -219,6 +252,13 @@ class Daemon:
                 f"the watch loop ended: {type(e).__name__}: {e}\n{traceback.format_exc()}",
             )
             raise
+        else:
+            # Events the watcher received but never yielded (queued behind a
+            # long handler when stop arrived) are picked up by one last pass.
+            try:
+                self.reconcile()
+            except Exception as e:
+                self.logger.warning(f"final reconcile skipped: {e}")
         finally:
             self.shutdown()
 
@@ -268,7 +308,7 @@ class Daemon:
         with self.runner._lock:
             in_flight = [h.run.id for h in self.runner.in_flight.values()]
         return {
-            "status": "ok",
+            "status": "stopping" if self._stop.is_set() else "ok",
             "root": str(self.root.path),
             "pid": os.getpid(),
             "started": self.started,
@@ -277,19 +317,25 @@ class Daemon:
         }
 
     def reload(self) -> dict:
-        """``tfs reload``: re-read ``config.toml`` and re-import every add-on.
-        ``[logging]`` and ``[daemon] bind/port`` take effect at the next
-        ``start``."""
+        """``tfs reload``: re-read ``config.toml`` (``[logging]`` included when
+        the daemon owns the logging setup) and re-import every add-on.
+        ``[daemon] bind/port`` take effect at the next ``start``."""
         try:
             self.config = self.root.load_config()
             self.runner.config = self.config
             config_ok = True
+            if self.apply_logging:
+                from tag_file_system.core.logger import configure_logging
+
+                configure_logging(
+                    self.config.logging.level, self.root.path / self.config.logging.file, stream=False
+                )
         except ConfigError as e:
             config_ok = False
             self.runner.problem(
                 Severity.ERR, "config.invalid", f"config.toml not reloaded: {e}"
             )
-        loaded = self.loader.load_all()
+        loaded = self._load()
         return {
             "config": "reloaded" if config_ok else "kept",
             "addons": sorted(a.name for a in loaded),
@@ -340,9 +386,10 @@ class Daemon:
 
         for change, path in script_events:
             if change is Change.deleted:
+                self._load_problems.pop(path.name, None)
                 self.loader.unload(path)
             else:
-                self.loader.load(path)
+                self._load(path)
         if data_events:
             self._handle_data(data_events, source)
 

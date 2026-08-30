@@ -712,8 +712,14 @@ class SQLiteBackend:
             clauses.append("f.format = ?")
             params.append("." + file_type.lstrip("."))
         if mime_type:
-            clauses.append("f.mime_type = ?")
-            params.append(mime_type)
+            if mime_type.endswith("/*"):
+                # a family: image/* matches image/jpeg, image/png, ...
+                clauses.append("f.mime_type LIKE ? ESCAPE '\\'")
+                family = mime_type[:-1].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                params.append(family + "%")
+            else:
+                clauses.append("f.mime_type = ?")
+                params.append(mime_type)
         if file_size_range is not None:
             low, high = sorted(file_size_range)
             clauses.append("f.size BETWEEN ? AND ?")
