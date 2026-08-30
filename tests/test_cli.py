@@ -242,6 +242,51 @@ def test_stop_reaches_the_daemon_after_the_config_port_changed(root: Root, daemo
     assert not root.lock_path.exists()
 
 
+def test_another_roots_daemon_on_the_port_does_not_hide_this_root(
+    root: Root, daemon: Daemon, tmp_path: Path
+):
+    other = Root.init(tmp_path / "second")  # same default-ish port, no daemon of its own
+    Config(daemon=root.load_config().daemon).write(other.config_path)
+    (other.path / "b--own.txt").write_text("b")
+    indexer = Daemon(other)  # index it, then leave no daemon running
+    indexer.startup()
+    indexer.shutdown()
+
+    listed = tfs("list", "--root", str(other.path))
+    found = tfs("query", "--root", str(other.path), "-t", "own")
+    stopped = tfs("stop", "--root", str(other.path))
+
+    assert listed.exit_code == 0 and "no daemon running" in listed.output
+    assert found.exit_code == 0 and "b--own.txt" in found.output
+    assert stopped.exit_code == 1 and "no daemon is running" in stopped.output
+
+
+def test_stop_is_graceful_for_an_ipv6_daemon(root: Root):
+    import socket as socket_module
+
+    try:
+        with socket_module.socket(socket_module.AF_INET6) as s:
+            s.bind(("::1", 0))
+            port = s.getsockname()[1]
+    except OSError:
+        pytest.skip("no IPv6 loopback here")
+    Config(daemon=DaemonConfig(bind="::1", port=port, stop_timeout_seconds=0.5)).write(
+        root.config_path
+    )
+    d = Daemon(root, control=True, poll_ms=50)
+    d.startup()
+    thread = threading.Thread(target=d.run_forever, daemon=True)
+    thread.start()
+    try:
+        result = tfs("stop", "--root", str(root.path), "--timeout", "10")
+
+        assert result.exit_code == 0, result.output
+        assert "stopped" in result.output and "forced" not in result.output
+    finally:
+        d.request_stop()
+        thread.join(10)
+
+
 def test_start_with_a_missing_token_is_a_clean_error(root: Root):
     root.token_path.unlink()
 

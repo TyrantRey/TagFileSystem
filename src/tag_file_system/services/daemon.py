@@ -163,7 +163,9 @@ class Daemon:
         # The port goes into the lock: `tfs stop` must reach *this* daemon
         # even if config.toml is edited (or broken) while it runs.
         self.lock.acquire(
-            force=force, port=self.config.daemon.port if self.control_enabled else None
+            force=force,
+            port=self.config.daemon.port if self.control_enabled else None,
+            bind=self.config.daemon.bind if self.control_enabled else None,
         )
         if previous is not None and not previous.is_mine():
             stale = self.lock.is_stale(previous)

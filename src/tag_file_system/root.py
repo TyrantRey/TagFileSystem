@@ -263,7 +263,10 @@ class LockInfo:
     pid: int
     hostname: str
     created_at: float
-    port: int | None = None  # the control port that daemon actually opened
+    # Where that daemon's control channel actually listens, so a client can
+    # reach it without (or despite) config.toml.
+    port: int | None = None
+    bind: str | None = None
 
     @property
     def age(self) -> float:
@@ -292,6 +295,7 @@ class LockInfo:
                 "hostname": self.hostname,
                 "created_at": self.created_at,
                 "port": self.port,
+                "bind": self.bind,
             }
         )
 
@@ -345,8 +349,15 @@ class Lock:
         port = data.get("port")
         if isinstance(port, bool) or not isinstance(port, int) or not 0 < port <= 65535:
             port = None
+        bind = data.get("bind")
+        if not isinstance(bind, str) or not bind.strip():
+            bind = None
         return LockInfo(
-            pid=pid, hostname=hostname, created_at=float(created_at), port=port
+            pid=pid,
+            hostname=hostname,
+            created_at=float(created_at),
+            port=port,
+            bind=bind,
         )
 
     def is_stale(self, info: LockInfo) -> bool:
@@ -361,7 +372,9 @@ class Lock:
             return None
         return info
 
-    def acquire(self, force: bool = False, port: int | None = None) -> LockInfo:
+    def acquire(
+        self, force: bool = False, port: int | None = None, bind: str | None = None
+    ) -> LockInfo:
         """Take the lock. ``force`` takes over a lock this host cannot judge
         (another host's, or one whose pid is gone) — never one held by a
         process that is still running here."""
@@ -373,6 +386,7 @@ class Lock:
             hostname=socket.gethostname(),
             created_at=time.time(),
             port=port,
+            bind=bind,
         )
         deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
         last_error: str | None = None

@@ -37,8 +37,9 @@ anything:
 - `init` refuses if any ancestor directory already contains `.tfs/`.
 - The CLI locates the root by walking up from the CWD, like git.
 - Only one daemon may run per root. `.tfs/lock` holds pid + hostname + the
-  control port it opened (so `tfs stop` reaches *that* daemon even if
-  `config.toml` changed meanwhile); a second `start` refuses (`LockHeld`). A
+  control address it opened (`bind` + `port`), so every command reaches
+  *that* daemon even if `config.toml` changed meanwhile; a second `start`
+  refuses (`LockHeld`). A
   lock that is *stale* — written on this host by a pid that is gone, or on
   another host longer than six hours ago — is taken over automatically with a
   P2 `lock.stale`. `--force` takes over a lock this host cannot judge (another
@@ -454,6 +455,10 @@ Exactly six commands (Typer):
   machines). On POSIX that is a `SIGTERM` (graceful); on Windows a detached
   daemon has no console to receive a break, so it is killed and the next
   `start` recovers its runs (`stop` says so).
+- A 401 from the configured address means *another* program owns it (two
+  roots left on the same port): unless this root's lock names a live local
+  daemon, the root has none — `list`/`query` fall back to `script/` and the
+  database, `stop` says so.
 - `query --mime` takes an exact type or a family (`image/*`); `--under`
   takes a root-relative directory; blank tags and escaping prefixes are
   usage errors (HTTP 400 on the channel). `list` shows the load problems the

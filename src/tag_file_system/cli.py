@@ -27,7 +27,16 @@ from tag_file_system.config import Config, ConfigError
 from tag_file_system.core.interface.action import Severity
 from tag_file_system.core.logger import configure_logging
 from tag_file_system.core.paths import has_parent_reference, is_anchored, posix_key
-from tag_file_system.root import Lock, LockHeld, NotARoot, Root, RootError, RootExists, pid_alive
+from tag_file_system.root import (
+    Lock,
+    LockHeld,
+    LockInfo,
+    NotARoot,
+    Root,
+    RootError,
+    RootExists,
+    pid_alive,
+)
 from tag_file_system.services.control import (
     ControlClient,
     ControlError,
@@ -68,20 +77,50 @@ def _config(root: Root) -> Config:
         raise _fail(str(e))
 
 
-def _client(root: Root, port: int | None = None, timeout: float = 5.0) -> ControlClient:
-    """The daemon's client. A root whose config or token cannot be read has
-    no reachable daemon: that is ``ControlUnavailable`` (with the reason), so
-    the direct fallbacks still run. ``port`` overrides the configured one
-    (the running daemon records the port it opened in ``.tfs/lock``)."""
-    bind = "127.0.0.1"
+def _one_line(error: Exception) -> str:
+    text = " ".join(str(error).split())
+    return text if len(text) <= 300 else text[:297] + "..."
+
+
+def _client(
+    root: Root, holder: LockInfo | None = None, timeout: float = 5.0
+) -> ControlClient:
+    """The daemon's client.
+
+    A running daemon records the address it opened in ``.tfs/lock``, so it
+    stays reachable even when ``config.toml`` is edited (or broken) while it
+    runs; otherwise the configured address is used. A root whose token or
+    config cannot be read has no reachable daemon: that is
+    ``ControlUnavailable`` (with the reason), so the direct fallbacks run.
+    """
     try:
         token = root.read_token()
-        if port is None:
-            config = root.load_config()
-            bind, port = config.daemon.bind, config.daemon.port
-    except (ConfigError, RootError) as e:
-        raise ControlUnavailable(str(e).splitlines()[0])
-    return ControlClient(bind, port, token, timeout=timeout)
+    except RootError as e:
+        raise ControlUnavailable(_one_line(e))
+    if holder is not None and holder.port:
+        return ControlClient(holder.bind or "127.0.0.1", holder.port, token, timeout=timeout)
+    try:
+        config = root.load_config()
+    except ConfigError as e:
+        raise ControlUnavailable(_one_line(e))
+    return ControlClient(config.daemon.bind, config.daemon.port, token, timeout=timeout)
+
+
+def _no_daemon_here(error: ControlError, holder: LockInfo | None) -> bool:
+    """A 401 means something else owns that address — another root's daemon
+    on a shared port, say. Unless this root's lock says a daemon of ours is
+    running, this root simply has none."""
+    return error.status == 401 and (holder is None or not holder.is_live_local())
+
+
+def _unreachable(error: ControlError, holder: LockInfo | None) -> str | None:
+    """Why the daemon could not be reached, or ``None`` when the error is a
+    real answer from this root's daemon and must be shown as such."""
+    if isinstance(error, ControlUnavailable):
+        return error.message
+    if _no_daemon_here(error, holder):
+        return "another program answers on the configured port"
+    return None
 
 
 def is_network_path(path: Path) -> bool:
@@ -187,12 +226,16 @@ def list_addons(
     """List the loaded add-ons with their hooks, arguments and load problems."""
     where = _root(root)
     problems: list[dict[str, Any]] = []
+    holder = Lock(where).holder()
     try:
-        payload = _client(where).actions()
+        payload = _client(where, holder).actions()
         actions = payload["actions"]
         problems = payload.get("problems", [])
         source = "daemon"
-    except ControlUnavailable as e:
+    except ControlError as e:
+        reason = _unreachable(e, holder)
+        if reason is None:
+            raise _fail(str(e))
         loader = AddonLoader(
             where,
             report=lambda severity, kind, message, *, action_name=None: problems.append(
@@ -211,9 +254,7 @@ def list_addons(
             }
             for name, addon in sorted(loader.addons.items())
         ]
-        source = f"script/ (no daemon running: {e.message})"
-    except ControlError as e:
-        raise _fail(str(e))
+        source = f"script/ (no daemon running: {reason})"
 
     if as_json:
         typer.echo(json.dumps({"source": source, "actions": actions, "problems": problems}, indent=2))
@@ -261,11 +302,14 @@ def query(
         under = validate_prefix(prefix)
     except ValueError as e:
         raise _fail(str(e), code=2)
+    holder = Lock(where).holder()
     try:
-        files = _client(where).files(
+        files = _client(where, holder).files(
             tags=tags, name=name, format=file_format, mime=mime, deleted=deleted, prefix=under, runs=runs
         )
-    except ControlUnavailable:
+    except ControlError as e:
+        if _unreachable(e, holder) is None:
+            raise _fail(str(e))
         backend, store = _open_backend(where)
         try:
             rows = backend.query_files(
@@ -281,8 +325,6 @@ def query(
             ]
         finally:
             backend.close()
-    except ControlError as e:
-        raise _fail(str(e))
 
     if as_json:
         typer.echo(json.dumps(files, indent=2))
@@ -308,12 +350,16 @@ def query(
 def reload(root: RootOption = None) -> None:
     """Re-import the add-ons and re-read config.toml in the running daemon."""
     where = _root(root)
+    holder = Lock(where).holder()
     try:
-        result = _client(where).reload()
-    except ControlUnavailable as e:
-        raise _fail(f"{e}; is the daemon running? (`tfs start`)")
+        result = _client(where, holder).reload()
     except ControlError as e:
-        raise _fail(str(e))
+        reason = _unreachable(e, holder)
+        if reason is None:
+            raise _fail(str(e))
+        if holder is not None and holder.is_live_local():
+            raise _fail(f"cannot reach the daemon holding this root (pid {holder.pid}): {reason}")
+        raise _fail(f"{reason}; is the daemon running? (`tfs start`)")
     typer.echo(f"config {result['config']}; add-ons: {', '.join(result['addons']) or '(none)'}")
 
 
@@ -457,7 +503,7 @@ def stop(
             timeout = 30.0 + STOP_GRACE_SECONDS
     forced = False
     try:
-        client = _client(where, port=holder.port if holder is not None else None)
+        client = _client(where, holder)
         health = client.health()
         answering = health.get("pid")
         if holder is not None and answering is not None and answering != holder.pid:
@@ -480,6 +526,8 @@ def stop(
             raise _fail(f"could not stop pid {holder.pid}")
         forced = sent is False
     except ControlError as e:
+        if _no_daemon_here(e, holder):
+            raise _fail("no daemon is running for this root")
         if e.status == 401 and holder is not None:
             raise _fail(
                 f"the process answering on that port rejected this root's token: it is not this "
