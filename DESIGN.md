@@ -36,12 +36,19 @@ anything:
 - Data = the whole root minus `.tfs/` and `script/`. There is no `files/` level.
 - `init` refuses if any ancestor directory already contains `.tfs/`.
 - The CLI locates the root by walking up from the CWD, like git.
-- Only one daemon may run per root. `.tfs/lock` holds pid + hostname; a second
-  `start` refuses (`LockHeld`). A lock that is *stale* — written on this host
-  by a pid that is gone, or on another host longer than six hours ago — is
-  taken over automatically with a P2 `lock.stale`; `--force` takes over a lock
-  that looks live (P0 `lock.overridden`). Two watchers on one root over SMB
+- Only one daemon may run per root. `.tfs/lock` holds pid + hostname + the
+  control port it opened (so `tfs stop` reaches *that* daemon even if
+  `config.toml` changed meanwhile); a second `start` refuses (`LockHeld`). A
+  lock that is *stale* — written on this host by a pid that is gone, or on
+  another host longer than six hours ago — is taken over automatically with a
+  P2 `lock.stale`. `--force` takes over a lock this host cannot judge (another
+  host's, P0 `lock.overridden`); it **never** displaces a process that is
+  still running here — stop that one first. Two watchers on one root over SMB
   would corrupt the DB — this is the guardrail.
+- Only one daemon may hold a control port: the server binds exclusively
+  (`SO_EXCLUSIVEADDRUSE`, no `SO_REUSEADDR`), so two roots configured with the
+  same port cannot both start — the second fails at bind and releases its
+  lock, instead of running unreachable behind the first.
 
 ### `config.toml`
 

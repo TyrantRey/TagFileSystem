@@ -68,16 +68,20 @@ def _config(root: Root) -> Config:
         raise _fail(str(e))
 
 
-def _client(root: Root) -> ControlClient:
+def _client(root: Root, port: int | None = None, timeout: float = 5.0) -> ControlClient:
     """The daemon's client. A root whose config or token cannot be read has
     no reachable daemon: that is ``ControlUnavailable`` (with the reason), so
-    the direct fallbacks still run."""
+    the direct fallbacks still run. ``port`` overrides the configured one
+    (the running daemon records the port it opened in ``.tfs/lock``)."""
+    bind = "127.0.0.1"
     try:
-        config = root.load_config()
         token = root.read_token()
+        if port is None:
+            config = root.load_config()
+            bind, port = config.daemon.bind, config.daemon.port
     except (ConfigError, RootError) as e:
-        raise ControlUnavailable(str(e))
-    return ControlClient(config.daemon.bind, config.daemon.port, token)
+        raise ControlUnavailable(str(e).splitlines()[0])
+    return ControlClient(bind, port, token, timeout=timeout)
 
 
 def is_network_path(path: Path) -> bool:
@@ -344,6 +348,8 @@ def start(
     try:
         daemon.startup(force=force)
     except LockHeld as e:
+        if e.info.is_live_local():
+            raise _fail(f"{e}; that process is running on this machine — `tfs stop` it first")
         raise _fail(f"{e}; use --force if that daemon is gone")
     except (RootError, ConfigError) as e:
         daemon.shutdown()
@@ -385,8 +391,10 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
             args, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kwargs
         )
 
-    # The child re-execs (uv trampoline) and may die at once (lock, port):
-    # report what actually happened, not that a process was spawned.
+    # The child may re-exec and may die at once (lock, port): report what
+    # actually happened, not that a process was spawned. The control channel
+    # opens before the root is reconciled, so answering is "up" — a big
+    # first reconcile must not look like a failure.
     previous_pid = running.get("pid") if running else None
     deadline = time.monotonic() + 15.0
     while time.monotonic() < deadline:
@@ -397,10 +405,13 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
         except ControlError:
             time.sleep(0.25)
             continue
-        if health.get("started") and health.get("pid") != previous_pid:
-            typer.echo(f"daemon started in the background (pid {health['pid']}); output in {log}")
+        pid = health.get("pid")
+        if pid is not None and pid != previous_pid:
+            state = "watching" if health.get("started") else "starting: reconciling the root"
+            typer.echo(f"daemon started in the background (pid {pid}, {state}); output in {log}")
             return
         time.sleep(0.25)
+
     tail = ""
     try:
         tail = "\n".join(log.read_text(errors="replace").splitlines()[-5:])
@@ -408,7 +419,20 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
         pass
     if process.poll() is not None:
         raise _fail(f"the daemon exited with code {process.returncode}:\n{tail}")
+    # Alive but never opened its channel: do not leave it running.
+    _kill_silently(process)
+    holder = Lock(where).holder()
+    if holder is not None and holder.pid != previous_pid and holder.is_live_local():
+        _signal_stop(holder.pid)
     raise _fail(f"the daemon did not come up within 15s (pid {process.pid}); output so far:\n{tail}")
+
+
+def _kill_silently(process: subprocess.Popen) -> None:
+    try:
+        process.kill()
+        process.wait(5)
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        pass
 
 
 # ------------------------------------------------------------------ stop
@@ -433,7 +457,15 @@ def stop(
             timeout = 30.0 + STOP_GRACE_SECONDS
     forced = False
     try:
-        _client(where).stop()
+        client = _client(where, port=holder.port if holder is not None else None)
+        health = client.health()
+        answering = health.get("pid")
+        if holder is not None and answering is not None and answering != holder.pid:
+            raise _fail(
+                f"the daemon answering on that port is pid {answering}, but this root's lock "
+                f"is held by pid {holder.pid}; that is a different daemon — check [daemon] port"
+            )
+        client.stop()
     except ControlUnavailable as e:
         if holder is None:
             raise _fail("no daemon is running for this root")
@@ -448,6 +480,11 @@ def stop(
             raise _fail(f"could not stop pid {holder.pid}")
         forced = sent is False
     except ControlError as e:
+        if e.status == 401 and holder is not None:
+            raise _fail(
+                f"the process answering on that port rejected this root's token: it is not this "
+                f"root's daemon (the lock holds pid {holder.pid} on {holder.hostname})"
+            )
         raise _fail(str(e))
 
     deadline = time.monotonic() + timeout

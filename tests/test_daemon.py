@@ -466,7 +466,7 @@ def test_watch_filter_keeps_dotfiles_and_drops_tfs(root: Root, daemon: Daemon):
     assert not daemon._watch_filter(Change.added, str(root.path.parent / "outside.txt"))
 
 
-def test_forced_takeover_of_a_live_lock_is_critical(root: Root, tmp_path: Path):
+def test_force_never_displaces_a_live_local_daemon(root: Root):
     import subprocess
 
     sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
@@ -474,10 +474,17 @@ def test_forced_takeover_of_a_live_lock_is_critical(root: Root, tmp_path: Path):
         first = Daemon(root)
         first.startup()
         info = json.loads(root.lock_path.read_text())
-        info["pid"] = sleeper.pid
-        first.backend.close()
-        root.lock_path.write_text(json.dumps(info))
+        first.backend.close()  # the lock stays, now "held" by the live sleeper
+        root.lock_path.write_text(json.dumps({**info, "pid": sleeper.pid}))
 
+        with pytest.raises(LockHeld):
+            Daemon(root).startup(force=True)
+        assert json.loads(root.lock_path.read_text())["pid"] == sleeper.pid
+
+        # ...but a live lock from another host is exactly what --force is for
+        root.lock_path.write_text(
+            json.dumps({**info, "pid": sleeper.pid, "hostname": "other-nas"})
+        )
         forced = Daemon(root)
         forced.startup(force=True)
         assert problems(forced, "lock.overridden")[0].severity is Severity.CRIT
@@ -485,6 +492,30 @@ def test_forced_takeover_of_a_live_lock_is_critical(root: Root, tmp_path: Path):
     finally:
         sleeper.kill()
         sleeper.wait()
+
+
+def test_the_lock_records_the_control_port(root: Root, tmp_path: Path):
+    import socket as socket_module
+
+    with socket_module.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    Config(daemon=DaemonConfig(port=port, stop_timeout_seconds=0.5)).write(root.config_path)
+    daemon = Daemon(root, control=True)
+    daemon.startup()
+    try:
+        holder = Lock(root).holder()
+        assert holder is not None and holder.port == port
+    finally:
+        daemon.shutdown()
+
+    plain = Daemon(root)  # no control channel: nothing to record
+    plain.startup()
+    try:
+        holder = Lock(root).holder()
+        assert holder is not None and holder.port is None
+    finally:
+        plain.shutdown()
 
 
 def test_edits_and_deletions_are_observed_while_a_run_is_in_flight(root: Root, daemon: Daemon):

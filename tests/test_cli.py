@@ -1,5 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
+import os
 import json
 import socket
 import subprocess
@@ -198,6 +199,49 @@ def test_start_detached_reports_a_child_that_dies(root: Root, daemon: Daemon):
     assert "control channel" in result.output
 
 
+def test_a_second_root_cannot_share_the_control_port(root: Root, daemon: Daemon, tmp_path: Path):
+    other = Root.init(tmp_path / "second")
+    Config(daemon=root.load_config().daemon).write(other.config_path)  # same port
+
+    result = tfs("start", "-d", "--root", str(other.path))
+
+    assert result.exit_code == 1
+    assert "exited with code" in result.output or "did not come up" in result.output
+    assert Lock(other).holder() is None  # nothing left running for that root
+    assert daemon.status()["started"]  # the first daemon is untouched
+
+
+def test_force_does_not_start_a_second_daemon_on_one_root(root: Root):
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        Lock(root).acquire()
+        info = json.loads(root.lock_path.read_text())
+        root.lock_path.write_text(json.dumps({**info, "pid": sleeper.pid}))
+
+        result = tfs("start", "--force", "--root", str(root.path))
+
+        assert result.exit_code == 1
+        assert "tfs stop" in result.output
+        holder = Lock(root).holder()
+        assert holder is not None and holder.pid == sleeper.pid  # untouched
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+def test_stop_reaches_the_daemon_after_the_config_port_changed(root: Root, daemon: Daemon):
+    config = root.load_config()
+    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(root.config_path)
+    holder = Lock(root).holder()
+    assert holder is not None and holder.port == config.daemon.port
+
+    result = tfs("stop", "--root", str(root.path), "--timeout", "10")
+
+    assert result.exit_code == 0, result.output
+    assert "stopped" in result.output and "forced" not in result.output
+    assert not root.lock_path.exists()
+
+
 def test_start_with_a_missing_token_is_a_clean_error(root: Root):
     root.token_path.unlink()
 
@@ -252,7 +296,7 @@ def test_start_refuses_a_live_lock(root: Root):
         result = tfs("start", "--root", str(root.path))
 
         assert result.exit_code == 1
-        assert "locked by pid" in result.output and "--force" in result.output
+        assert "locked by pid" in result.output and "tfs stop" in result.output
     finally:
         sleeper.kill()
         sleeper.wait()

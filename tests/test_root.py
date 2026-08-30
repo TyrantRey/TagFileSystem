@@ -308,6 +308,12 @@ def test_second_acquire_by_a_live_process_is_refused(
         Lock(root).acquire()
 
     assert exc.value.info.pid == sleeper.pid
+    with pytest.raises(LockHeld):
+        Lock(root).acquire(force=True)  # force never displaces a live local pid
+    assert Lock(root).read().pid == sleeper.pid  # type: ignore[union-attr]
+
+    # a live lock from *another* host is what --force is for
+    write_lock(root, pid=sleeper.pid, hostname="other-nas")
     assert Lock(root).acquire(force=True).is_mine()
 
 

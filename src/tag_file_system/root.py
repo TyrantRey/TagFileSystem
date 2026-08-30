@@ -263,6 +263,7 @@ class LockInfo:
     pid: int
     hostname: str
     created_at: float
+    port: int | None = None  # the control port that daemon actually opened
 
     @property
     def age(self) -> float:
@@ -279,9 +280,19 @@ class LockInfo:
     def is_mine(self) -> bool:
         return self.pid == os.getpid() and self.hostname == socket.gethostname()
 
+    def is_live_local(self) -> bool:
+        """A process on *this* host that is still running: whatever it is
+        doing, it is not something ``--force`` may push aside."""
+        return self.hostname == socket.gethostname() and pid_alive(self.pid)
+
     def dumps(self) -> str:
         return json.dumps(
-            {"pid": self.pid, "hostname": self.hostname, "created_at": self.created_at}
+            {
+                "pid": self.pid,
+                "hostname": self.hostname,
+                "created_at": self.created_at,
+                "port": self.port,
+            }
         )
 
 
@@ -331,7 +342,12 @@ class Lock:
             or not 0 < created_at < time.time() + _ABSURD_FUTURE
         ):
             return None
-        return LockInfo(pid=pid, hostname=hostname, created_at=float(created_at))
+        port = data.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 < port <= 65535:
+            port = None
+        return LockInfo(
+            pid=pid, hostname=hostname, created_at=float(created_at), port=port
+        )
 
     def is_stale(self, info: LockInfo) -> bool:
         if info.hostname == socket.gethostname():
@@ -345,12 +361,18 @@ class Lock:
             return None
         return info
 
-    def acquire(self, force: bool = False) -> LockInfo:
+    def acquire(self, force: bool = False, port: int | None = None) -> LockInfo:
+        """Take the lock. ``force`` takes over a lock this host cannot judge
+        (another host's, or one whose pid is gone) — never one held by a
+        process that is still running here."""
         if not self.path.parent.is_dir():
             raise NotARoot(f"{self.path.parent} does not exist")
 
         mine = LockInfo(
-            pid=os.getpid(), hostname=socket.gethostname(), created_at=time.time()
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            created_at=time.time(),
+            port=port,
         )
         deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
         last_error: str | None = None
@@ -369,8 +391,12 @@ class Lock:
                         last_error = "lock file is being written by another process"
                         time.sleep(0.01)
                         continue
-                elif not info.is_mine() and not force and not self.is_stale(info):
-                    raise LockHeld(info)
+                elif not info.is_mine():
+                    if force:
+                        if info.is_live_local():
+                            raise LockHeld(info)  # force never displaces a live daemon
+                    elif not self.is_stale(info):
+                        raise LockHeld(info)
                 last_error = self._evict(force) or last_error
                 continue
             except PermissionError as e:

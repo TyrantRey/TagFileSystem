@@ -120,11 +120,25 @@ def file_payload(file: TaggedFile, runs: list[RunRecord] | None = None) -> dict[
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
+    # SO_REUSEADDR lets a *second* process bind a port that is already
+    # listening on Windows: two roots configured with the same port would
+    # both "start", and only one of them could ever be reached. One daemon
+    # per port, and a clashing start fails at bind.
+    allow_reuse_address = False
 
     def __init__(self, bind: str, port: int, handler: type[BaseHTTPRequestHandler]) -> None:
         if ipaddress.ip_address(bind).version == 6:
             self.address_family = socket.AF_INET6
         super().__init__((bind, port), handler)
+
+    def server_bind(self) -> None:
+        exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+        if exclusive is not None:  # Windows: refuse to share the port at all
+            try:
+                self.socket.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+            except OSError:  # pragma: no cover - older stacks
+                pass
+        super().server_bind()
 
 
 class ControlServer:

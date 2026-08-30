@@ -160,7 +160,11 @@ class Daemon:
         if self.started:
             raise RuntimeError("the daemon is already started")
         previous: LockInfo | None = self.lock.read()
-        self.lock.acquire(force=force)
+        # The port goes into the lock: `tfs stop` must reach *this* daemon
+        # even if config.toml is edited (or broken) while it runs.
+        self.lock.acquire(
+            force=force, port=self.config.daemon.port if self.control_enabled else None
+        )
         if previous is not None and not previous.is_mine():
             stale = self.lock.is_stale(previous)
             self.runner.problem(
