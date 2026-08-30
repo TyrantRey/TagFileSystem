@@ -20,9 +20,9 @@ def register_database_pipeline(
 ) -> None:
     """Connect the database event router to a storage backend.
 
-    INSERT/UPDATE record the file's hash, size, format and MIME type, then sync
-    the file's tags with the ``--tag`` markers parsed from its filename.
-    DELETE soft-deletes the row.
+    INSERT/UPDATE record the file's hash, size, format, MIME type and mtime,
+    then sync the file's tags with the ``--tag`` markers parsed from its
+    filename. DELETE soft-deletes the row.
     """
     tag_parser = parser if parser is not None else TaggingParser()
 
@@ -33,12 +33,27 @@ def register_database_pipeline(
         return list(dict.fromkeys(tag.name for tag in parsed.tags))
 
     def describe(path: Path, metadata: FileMetadata) -> dict:
+        mtime_ns = path.stat().st_mtime_ns
         return {
-            "file_hash": compute_file_hash(path),
+            "file_hash": file_hash(path, metadata.file_size, mtime_ns),
             "file_size": metadata.file_size,
             "file_format": metadata.file_format or None,
             "file_mime_type": metadata.mime_type or guess_mime_type(path),
+            "mtime_ns": mtime_ns,
         }
+
+    def file_hash(path: Path, size: int, mtime_ns: int) -> str:
+        """sha256, reused from the stored row when ``(size, mtime_ns)`` are
+        unchanged (DESIGN.md §5): a touched 20 GB video is not re-hashed."""
+        stored = backend.query_file(path, include_deleted=True)
+        if (
+            stored is not None
+            and stored.metadata is not None
+            and stored.metadata.mtime_ns == mtime_ns
+            and stored.metadata.file_size == size
+        ):
+            return stored.file_hash
+        return compute_file_hash(path)
 
     @router.on_insert()
     def handle_insert(path: Path, metadata: FileMetadata) -> None:

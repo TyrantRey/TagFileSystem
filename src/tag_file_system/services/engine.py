@@ -34,15 +34,17 @@ class TagFileEngine:
         self.folder_setting = FolderSetting()
         self.database_setting = DatabaseSetting()
 
-        self.root_dir = (
+        # Absolute, so that the paths the watcher reports can be relativized
+        # to the root when they are stored.
+        self.root_dir = Path(
             root_dir if root_dir is not None else self.folder_setting.root_dir
-        )
-        self.files_dir = (
+        ).resolve()
+        self.files_dir = Path(
             files_dir if files_dir is not None else self.folder_setting.files_dir
-        )
-        self.tags_dir = (
+        ).resolve()
+        self.tags_dir = Path(
             tags_dir if tags_dir is not None else self.folder_setting.tags_dir
-        )
+        ).resolve()
         self.database_path = (
             database_path
             if database_path is not None
@@ -71,7 +73,7 @@ class TagFileEngine:
     def init_database(self, database_path: Path):
         self.logger.info(f"Initializing database at {database_path}")
 
-        self.database_engine.init_database(database_path)
+        self.database_engine.init_database(database_path, root_dir=self.root_dir)
 
     def start(self):
         self.logger.info("Starting TagFileEngine")

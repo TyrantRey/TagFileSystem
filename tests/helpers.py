@@ -1,13 +1,11 @@
 # Code by AkinoAlice@TyrantRey
 
-from pathlib import Path
-
-from tag_file_system.core.interface.database import DatabaseEngineProtocol
+from tag_file_system.core.interface.database import DatabaseEngineProtocol, PathLike
 from tag_file_system.core.interface.file_metadata import FileMetadata, Tag, TaggedFile
 
 
 def fetch(
-    backend: DatabaseEngineProtocol, path: Path, include_deleted: bool = False
+    backend: DatabaseEngineProtocol, path: PathLike, include_deleted: bool = False
 ) -> TaggedFile:
     """query_file that fails the test instead of returning None."""
     stored = backend.query_file(path, include_deleted=include_deleted)

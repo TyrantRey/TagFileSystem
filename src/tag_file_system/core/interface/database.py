@@ -2,12 +2,16 @@
 
 from datetime import datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Protocol
 
 from pydantic import BaseModel
 
 from tag_file_system.core.interface.file_metadata import Tag, TaggedFile
+
+# Any path the backend accepts: root-relative (``PurePosixPath`` preferred)
+# or absolute under the root it was opened with.
+PathLike = PurePath | str
 
 
 class OperationResultEnum(StrEnum):
@@ -51,7 +55,9 @@ class SQLResult(BaseModel):
 
 
 class DatabaseEngineProtocol(Protocol):
-    def init_database(self, database_path: Path) -> bool: ...
+    def init_database(
+        self, database_path: Path, root_dir: Path | None = None
+    ) -> bool: ...
 
     def close(self) -> None: ...
 
@@ -60,25 +66,27 @@ class DatabaseEngineProtocol(Protocol):
     def insert(
         self,
         filename: str,
-        file_path: Path,
+        file_path: PathLike,
         file_hash: str,
         file_size: int,
         file_format: str | None = None,
         file_mime_type: str | None = None,
+        mtime_ns: int | None = None,
     ) -> SQLResult: ...
 
     def update(
         self,
-        file_path: Path,
+        file_path: PathLike,
         file_hash: str,
         file_size: int,
         file_format: str | None = None,
         file_mime_type: str | None = None,
+        mtime_ns: int | None = None,
     ) -> SQLResult: ...
 
-    def delete(self, file_path: Path) -> SQLResult: ...
+    def delete(self, file_path: PathLike) -> SQLResult: ...
 
-    def modify(self, file_path: Path, new_path: Path) -> SQLResult: ...
+    def modify(self, file_path: PathLike, new_path: PathLike) -> SQLResult: ...
 
     # -- tags ----------------------------------------------------------------
 
@@ -89,7 +97,7 @@ class DatabaseEngineProtocol(Protocol):
         description: str | None = None,
     ) -> SQLResult: ...
 
-    def set_file_tags(self, file_path: Path, tag_names: list[str]) -> SQLResult: ...
+    def set_file_tags(self, file_path: PathLike, tag_names: list[str]) -> SQLResult: ...
 
     # -- queries -------------------------------------------------------------
 
@@ -98,7 +106,7 @@ class DatabaseEngineProtocol(Protocol):
     ) -> Tag | None: ...
 
     def query_file(
-        self, file_path: Path, include_deleted: bool = False
+        self, file_path: PathLike, include_deleted: bool = False
     ) -> TaggedFile | None: ...
 
     def query_files(
@@ -113,4 +121,5 @@ class DatabaseEngineProtocol(Protocol):
         file_size_range: tuple[int, int] | None = None,
         file_added_range: tuple[datetime, datetime] | None = None,
         include_deleted: bool = False,
+        path_prefix: str | None = None,
     ) -> list[TaggedFile]: ...

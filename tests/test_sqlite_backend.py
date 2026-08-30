@@ -376,6 +376,7 @@ def test_transaction_rolls_back_on_error(backend: SQLiteBackend, tmp_path: Path)
 
     broken = Broken()
     broken.connection = backend.connection
+    broken.root_dir = backend.root_dir
 
     with pytest.raises(RuntimeError):
         broken.explode(path)
@@ -396,6 +397,7 @@ def test_nested_transactional_calls_join_outer(backend: SQLiteBackend, tmp_path:
 
     composite = Composite()
     composite.connection = backend.connection
+    composite.root_dir = backend.root_dir
 
     with pytest.raises(RuntimeError):
         composite.insert_and_tag(path)

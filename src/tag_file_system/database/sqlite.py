@@ -1,15 +1,17 @@
 # Code by AkinoAlice@TyrantRey
 
 import sqlite3
+import threading
 from datetime import UTC, datetime
 from functools import wraps
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 from uuid import uuid4
 
 from tag_file_system.core.interface.database import (
     FileStatus,
     OperationResultEnum,
+    PathLike,
     SQLOperationType,
     SQLResult,
 )
@@ -19,6 +21,12 @@ from tag_file_system.core.interface.file_metadata import (
     TaggedFile,
 )
 from tag_file_system.core.logger import logger
+from tag_file_system.database.migrations import (
+    MigrationReport,
+    apply_migrations,
+    is_anchored,
+    relative_key,
+)
 
 # SQLite caps the number of bound parameters per statement; stay well under it.
 _IN_CHUNK = 500
@@ -29,25 +37,38 @@ def transactional(method: Callable) -> Callable:
 
     Commits on success, rolls back and re-raises on failure. Calls made while
     a transaction is already open (a transactional method calling another one)
-    simply join the outer transaction.
+    simply join the outer transaction. The backend's lock is held throughout,
+    so add-on threads can share the one connection (DESIGN.md §4.3).
     """
 
     @wraps(method)
     def wrapper(self, *args, **kwargs):
-        connection: sqlite3.Connection = self.connection
-        if connection.in_transaction:
-            return method(self, *args, **kwargs)
+        with self._lock:
+            connection: sqlite3.Connection = self.connection
+            if connection.in_transaction:
+                return method(self, *args, **kwargs)
 
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            result = method(self, *args, **kwargs)
-            connection.commit()
-            return result
-        except Exception as e:
-            connection.rollback()
-            name = getattr(method, "__name__", repr(method))
-            self.logger.error(f"Transaction failed in {name}: {e}")
-            raise
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                result = method(self, *args, **kwargs)
+                connection.commit()
+                return result
+            except Exception as e:
+                connection.rollback()
+                name = getattr(method, "__name__", repr(method))
+                self.logger.error(f"Transaction failed in {name}: {e}")
+                raise
+
+    return wrapper
+
+
+def locked(method: Callable) -> Callable:
+    """Serialize a read-only method on the backend's lock."""
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
 
     return wrapper
 
@@ -71,88 +92,96 @@ def _placeholders(count: int) -> str:
 
 
 class SQLiteBackend:
+    """One connection, serialized behind an ``RLock``; paths are stored as
+    root-relative POSIX keys (DESIGN.md §7)."""
+
     def __init__(self) -> None:
         self.logger = logger
+        self._lock = threading.RLock()
+        self._connection: sqlite3.Connection | None = None
+        self.root_dir: Path | None = None
+        self.migration_report: MigrationReport | None = None
+
+    @property
+    def connection(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise RuntimeError("database is not open; call init_database first")
+        return self._connection
+
+    @connection.setter
+    def connection(self, value: sqlite3.Connection) -> None:
+        self._connection = value
+
+    @property
+    def is_open(self) -> bool:
+        return self._connection is not None
 
     # ------------------------------------------------------------------ setup
 
-    def init_database(self, database_path: Path) -> bool:
-        self.database_file = database_path
+    def init_database(self, database_path: Path, root_dir: Path | None = None) -> bool:
+        """Open (creating if needed) and migrate the database.
 
-        self.connection = sqlite3.connect(self.database_file)
-        self.connection.row_factory = sqlite3.Row
-
-        sql_script = """
-        PRAGMA journal_mode = WAL;
-        PRAGMA foreign_keys = ON;
-        PRAGMA synchronous = NORMAL;
-
-        CREATE TABLE IF NOT EXISTS files (
-            id          TEXT    PRIMARY KEY,
-            filename    TEXT    NOT NULL,
-            path        TEXT    NOT NULL UNIQUE,
-            hash        TEXT    NOT NULL,
-            size        INTEGER NOT NULL DEFAULT 0,
-            format      TEXT    DEFAULT NULL,
-            mime_type   TEXT    DEFAULT NULL,
-            status      TEXT    NOT NULL DEFAULT 'active'
-                        CHECK(status IN ('active', 'deleted', 'archived')),
-            created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-            modified_at INTEGER NOT NULL DEFAULT (unixepoch()),
-            deleted_at  INTEGER
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_files_hash       ON files(hash) WHERE hash IS NOT NULL;
-        CREATE INDEX IF NOT EXISTS idx_files_status     ON files(status);
-        CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at);
-
-        CREATE TABLE IF NOT EXISTS tags (
-            id          TEXT    PRIMARY KEY,
-            name        TEXT    NOT NULL UNIQUE,
-            category    TEXT,
-            description TEXT,
-            created_at  INTEGER NOT NULL DEFAULT (unixepoch()),
-            updated_at  INTEGER NOT NULL DEFAULT (unixepoch())
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_tags_category ON tags(category);
-
-        CREATE TABLE IF NOT EXISTS tagged_files (
-            tag_id      TEXT    NOT NULL REFERENCES tags(id)  ON DELETE CASCADE,
-            file_id     TEXT    NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-            assigned_at INTEGER NOT NULL DEFAULT (unixepoch()),
-            PRIMARY KEY (tag_id, file_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_tagged_files_file_id ON tagged_files(file_id);
-
-        CREATE TABLE IF NOT EXISTS events (
-            id          TEXT    PRIMARY KEY,
-            name        TEXT    NOT NULL,
-            description TEXT,
-            file_id     TEXT    REFERENCES files(id) ON DELETE SET NULL,
-            tag_id      TEXT    REFERENCES tags(id)  ON DELETE SET NULL,
-            occurred_at INTEGER NOT NULL DEFAULT (unixepoch()),
-
-            CHECK (file_id IS NOT NULL OR tag_id IS NOT NULL)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_events_occurred_at ON events(occurred_at);
-        CREATE INDEX IF NOT EXISTS idx_events_file_id     ON events(file_id);
-        CREATE INDEX IF NOT EXISTS idx_events_tag_id      ON events(tag_id);
+        ``root_dir`` is what absolute paths are relativized against; without
+        it the backend only accepts relative paths. A failure leaves the
+        backend closed.
         """
+        with self._lock:
+            self.close()
+            self.database_file = database_path
+            self.root_dir = Path(root_dir).resolve() if root_dir is not None else None
 
-        self.connection.executescript(sql_script)
-        self.logger.info("Database initialized")
-        return True
+            connection = sqlite3.connect(self.database_file, check_same_thread=False)
+            self._connection = connection
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA journal_mode = WAL")
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("PRAGMA synchronous = NORMAL")
+                self.migration_report = apply_migrations(connection, self.root_dir)
+            except BaseException:
+                self.close()
+                raise
+            report = self.migration_report
+            if report.applied:
+                self.logger.info(
+                    f"Database migrated {report.from_version} -> {report.to_version} "
+                    f"({report.relativized} paths relativized, "
+                    f"{len(report.outside_root) + len(report.conflicts)} unresolved)"
+                )
+            self.logger.info("Database initialized")
+            return True
 
     def close(self) -> None:
-        connection = getattr(self, "connection", None)
-        if connection is None:
-            return
-        connection.close()
-        self.logger.info("Database connection closed")
+        with self._lock:
+            if self._connection is None:
+                return
+            self._connection.close()
+            self._connection = None
+            self.logger.info("Database connection closed")
 
     # -------------------------------------------------------------- internals
+
+    def key(self, path: PathLike) -> str:
+        """The stored key for ``path``: root-relative, POSIX separators.
+
+        Relative input is taken as already root-relative. Absolute input must
+        lie under ``root_dir``.
+        """
+        resolved = relative_key(path, self.root_dir)
+        if resolved is None:
+            if is_anchored(str(path)) and self.root_dir is None:
+                raise ValueError(
+                    f"Absolute path {path} given but the backend has no root_dir"
+                )
+            if is_anchored(str(path)):
+                raise ValueError(f"{path} is not under the root {self.root_dir}")
+            raise ValueError(f"{path!r} is not a usable root-relative key")
+        return resolved
+
+    def _absolute(self, key: str) -> Path:
+        if self.root_dir is None:
+            return Path(key)
+        return self.root_dir.joinpath(*PurePosixPath(key).parts)
 
     def _record_event(
         self,
@@ -174,9 +203,9 @@ class SQLiteBackend:
         )
         return event_id
 
-    def _find_file(self, cursor: sqlite3.Cursor, file_path: Path) -> sqlite3.Row | None:
+    def _find_file(self, cursor: sqlite3.Cursor, key: str) -> sqlite3.Row | None:
         return cursor.execute(
-            "SELECT id, status FROM files WHERE path = ?", (str(file_path),)
+            "SELECT id, status FROM files WHERE path = ?", (key,)
         ).fetchone()
 
     def _ensure_tag(
@@ -235,14 +264,15 @@ class SQLiteBackend:
                 )
         return tags_by_file
 
-    @staticmethod
-    def _row_to_tagged_file(row: sqlite3.Row, tags: list[Tag]) -> TaggedFile:
+    def _row_to_tagged_file(self, row: sqlite3.Row, tags: list[Tag]) -> TaggedFile:
         file_format: str | None = row["format"]
         file_type = file_format.lstrip(".") or None if file_format else None
+        key: str = row["path"]
         return TaggedFile(
             file_id=row["id"],
             file_hash=row["hash"],
-            original_path=Path(row["path"]),
+            path=PurePosixPath(key),
+            original_path=self._absolute(key),
             status=row["status"],
             tags=tags,
             metadata=FileMetadata(
@@ -251,6 +281,7 @@ class SQLiteBackend:
                 file_format=file_format,
                 file_type=file_type,
                 mime_type=row["mime_type"],
+                mtime_ns=row["mtime_ns"],
             ),
         )
 
@@ -260,33 +291,36 @@ class SQLiteBackend:
     def insert(
         self,
         filename: str,
-        file_path: Path,
+        file_path: PathLike,
         file_hash: str,
         file_size: int,
         file_format: str | None = None,
         file_mime_type: str | None = None,
+        mtime_ns: int | None = None,
     ) -> SQLResult:
         """Register a file. A soft-deleted row for the same path is revived."""
-        self.logger.info(f"Inserting file into database: {file_path}")
+        key = self.key(file_path)
+        self.logger.info(f"Inserting file into database: {key}")
         cursor = self.connection.cursor()
         operation_id = str(uuid4())
 
-        existing = self._find_file(cursor, file_path)
+        existing = self._find_file(cursor, key)
         if existing is None:
             file_id = str(uuid4())
             cursor.execute(
                 """
-                INSERT INTO files (id, filename, path, hash, size, format, mime_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO files (id, filename, path, hash, size, format, mime_type, mtime_ns)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     file_id,
                     filename,
-                    str(file_path),
+                    key,
                     file_hash,
                     file_size,
                     file_format,
                     file_mime_type,
+                    mtime_ns,
                 ),
             )
             status = OperationResultEnum.SUCCESS
@@ -296,11 +330,19 @@ class SQLiteBackend:
             cursor.execute(
                 """
                 UPDATE files
-                SET filename = ?, hash = ?, size = ?, format = ?, mime_type = ?,
+                SET filename = ?, hash = ?, size = ?, format = ?, mime_type = ?, mtime_ns = ?,
                     status = 'active', deleted_at = NULL, modified_at = unixepoch()
                 WHERE id = ?
                 """,
-                (filename, file_hash, file_size, file_format, file_mime_type, file_id),
+                (
+                    filename,
+                    file_hash,
+                    file_size,
+                    file_format,
+                    file_mime_type,
+                    mtime_ns,
+                    file_id,
+                ),
             )
             status = OperationResultEnum.SUCCESS
             event_name = "file.insert.restore"
@@ -321,20 +363,22 @@ class SQLiteBackend:
     @transactional
     def update(
         self,
-        file_path: Path,
+        file_path: PathLike,
         file_hash: str,
         file_size: int,
         file_format: str | None = None,
         file_mime_type: str | None = None,
+        mtime_ns: int | None = None,
     ) -> SQLResult:
         """Refresh the stored metadata of an existing path."""
-        self.logger.info(f"Updating file in database: {file_path}")
+        key = self.key(file_path)
+        self.logger.info(f"Updating file in database: {key}")
         cursor = self.connection.cursor()
         operation_id = str(uuid4())
 
-        existing = self._find_file(cursor, file_path)
+        existing = self._find_file(cursor, key)
         if existing is None:
-            self.logger.warning(f"Cannot update unknown file: {file_path}")
+            self.logger.warning(f"Cannot update unknown file: {key}")
             return SQLResult(
                 operation_id=operation_id,
                 status=OperationResultEnum.NOT_FOUND,
@@ -345,11 +389,11 @@ class SQLiteBackend:
         cursor.execute(
             """
             UPDATE files
-            SET hash = ?, size = ?, format = ?, mime_type = ?,
+            SET hash = ?, size = ?, format = ?, mime_type = ?, mtime_ns = ?,
                 status = 'active', deleted_at = NULL, modified_at = unixepoch()
             WHERE id = ?
             """,
-            (file_hash, file_size, file_format, file_mime_type, file_id),
+            (file_hash, file_size, file_format, file_mime_type, mtime_ns, file_id),
         )
         event_name = (
             "file.update.restore"
@@ -366,15 +410,16 @@ class SQLiteBackend:
         )
 
     @transactional
-    def delete(self, file_path: Path) -> SQLResult:
+    def delete(self, file_path: PathLike) -> SQLResult:
         """Soft-delete a file: keeps the row (and its tags), sets ``status``."""
-        self.logger.info(f"Deleting file from database: {file_path}")
+        key = self.key(file_path)
+        self.logger.info(f"Deleting file from database: {key}")
         cursor = self.connection.cursor()
         operation_id = str(uuid4())
 
-        existing = self._find_file(cursor, file_path)
+        existing = self._find_file(cursor, key)
         if existing is None:
-            self.logger.warning(f"Cannot delete unknown file: {file_path}")
+            self.logger.warning(f"Cannot delete unknown file: {key}")
             return SQLResult(
                 operation_id=operation_id,
                 status=OperationResultEnum.NOT_FOUND,
@@ -413,15 +458,16 @@ class SQLiteBackend:
         )
 
     @transactional
-    def modify(self, file_path: Path, new_path: Path) -> SQLResult:
+    def modify(self, file_path: PathLike, new_path: PathLike) -> SQLResult:
         """Record a rename/move of ``file_path`` to ``new_path``."""
-        self.logger.info(f"Moving file in database: {file_path} -> {new_path}")
+        old_key, new_key = self.key(file_path), self.key(new_path)
+        self.logger.info(f"Moving file in database: {old_key} -> {new_key}")
         cursor = self.connection.cursor()
         operation_id = str(uuid4())
 
-        existing = self._find_file(cursor, file_path)
+        existing = self._find_file(cursor, old_key)
         if existing is None:
-            self.logger.warning(f"Cannot move unknown file: {file_path}")
+            self.logger.warning(f"Cannot move unknown file: {old_key}")
             return SQLResult(
                 operation_id=operation_id,
                 status=OperationResultEnum.NOT_FOUND,
@@ -429,7 +475,7 @@ class SQLiteBackend:
             )
 
         file_id = existing["id"]
-        if str(new_path) == str(file_path):
+        if new_key == old_key:
             return SQLResult(
                 operation_id=operation_id,
                 status=OperationResultEnum.SUCCESS,
@@ -437,8 +483,8 @@ class SQLiteBackend:
                 type=SQLOperationType.File,
             )
 
-        if self._find_file(cursor, new_path) is not None:
-            self.logger.warning(f"Cannot move {file_path}: {new_path} already exists")
+        if self._find_file(cursor, new_key) is not None:
+            self.logger.warning(f"Cannot move {old_key}: {new_key} already exists")
             return SQLResult(
                 operation_id=operation_id,
                 status=OperationResultEnum.ALREADY_EXISTS,
@@ -452,13 +498,13 @@ class SQLiteBackend:
             SET path = ?, filename = ?, modified_at = unixepoch()
             WHERE id = ?
             """,
-            (str(new_path), new_path.name, file_id),
+            (new_key, PurePosixPath(new_key).name, file_id),
         )
         self._record_event(
             cursor,
             "file.move",
             file_id=file_id,
-            description=f"{file_path} -> {new_path}",
+            description=f"{old_key} -> {new_key}",
             event_id=operation_id,
         )
 
@@ -500,14 +546,15 @@ class SQLiteBackend:
         )
 
     @transactional
-    def set_file_tags(self, file_path: Path, tag_names: list[str]) -> SQLResult:
+    def set_file_tags(self, file_path: PathLike, tag_names: list[str]) -> SQLResult:
         """Make ``tag_names`` the exact tag set of a file, creating tags as needed."""
+        key = self.key(file_path)
         cursor = self.connection.cursor()
         operation_id = str(uuid4())
 
-        existing = self._find_file(cursor, file_path)
+        existing = self._find_file(cursor, key)
         if existing is None:
-            self.logger.warning(f"Cannot tag unknown file: {file_path}")
+            self.logger.warning(f"Cannot tag unknown file: {key}")
             return SQLResult(
                 operation_id=operation_id,
                 status=OperationResultEnum.NOT_FOUND,
@@ -547,7 +594,7 @@ class SQLiteBackend:
             self._record_event(cursor, "tag.unassign", file_id=file_id, tag_id=tag_id)
 
         if wanted_ids != current:
-            self.logger.info(f"Tags for {file_path}: {list(wanted)}")
+            self.logger.info(f"Tags for {key}: {list(wanted)}")
 
         return SQLResult(
             operation_id=operation_id,
@@ -558,6 +605,7 @@ class SQLiteBackend:
 
     # ---------------------------------------------------------------- queries
 
+    @locked
     def query_tag(
         self, tag_name: str | None = None, tag_id: str | None = None
     ) -> Tag | None:
@@ -582,19 +630,22 @@ class SQLiteBackend:
             time_added=_to_datetime(row["created_at"]),
         )
 
+    @locked
     def query_file(
-        self, file_path: Path, include_deleted: bool = False
+        self, file_path: PathLike, include_deleted: bool = False
     ) -> TaggedFile | None:
+        key = self.key(file_path)
         cursor = self.connection.cursor()
         sql = "SELECT * FROM files WHERE path = ?"
         if not include_deleted:
             sql += " AND status <> 'deleted'"
-        row = cursor.execute(sql, (str(file_path),)).fetchone()
+        row = cursor.execute(sql, (key,)).fetchone()
         if row is None:
             return None
         tags = self._load_tags(cursor, [row["id"]])[row["id"]]
         return self._row_to_tagged_file(row, tags)
 
+    @locked
     def query_files(
         self,
         tags: list[str] | None = None,
@@ -607,12 +658,15 @@ class SQLiteBackend:
         file_size_range: tuple[int, int] | None = None,
         file_added_range: tuple[datetime, datetime] | None = None,
         include_deleted: bool = False,
+        path_prefix: str | None = None,
     ) -> list[TaggedFile]:
         """Find files matching every given criterion.
 
         ``tags`` / ``tag_ids`` require the file to carry *all* listed tags.
         ``filename`` is a case-insensitive substring match; ``file_format`` is
         the suffix with its dot (``.txt``), ``file_type`` the suffix without it.
+        ``path_prefix`` is a root-relative directory key (``"@@make_copy"``):
+        only files below that directory match.
         """
         cursor = self.connection.cursor()
         clauses: list[str] = []
@@ -620,6 +674,12 @@ class SQLiteBackend:
 
         if not include_deleted:
             clauses.append("f.status <> 'deleted'")
+        if path_prefix is not None:
+            clauses.append("f.path LIKE ? ESCAPE '\\'")
+            prefix = self.key(path_prefix) + "/"
+            params.append(
+                prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            )
         if filename:
             clauses.append("f.filename LIKE ? ESCAPE '\\'")
             escaped = (
