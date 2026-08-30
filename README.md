@@ -1,5 +1,7 @@
 # TagFileSystem
 
+[![test](https://github.com/TyrantRey/TagFileSystem/actions/workflows/test.yml/badge.svg)](https://github.com/TyrantRey/TagFileSystem/actions/workflows/test.yml)
+
 Tags and functions live in your file and folder names. A daemon watches a
 root, records every file in SQLite, and runs your own Python add-ons on the
 files whose names ask for them:
@@ -124,6 +126,11 @@ the port; mount the root as a volume.
 uv run pytest -q              # tests (each test gets its own temporary root)
 uv run ty check src tests     # type check
 ```
+
+Both run in CI on every push and pull request
+([`.github/workflows/test.yml`](.github/workflows/test.yml)), on Linux and
+Windows against Python 3.12 and 3.13, followed by a smoke test that inits a
+root, starts the daemon, queries it and stops it.
 
 Linting/formatting is configured for [Trunk](https://trunk.io) (ruff, black,
 isort, bandit, markdownlint, prettier) in `.trunk/trunk.yaml`. Every source
