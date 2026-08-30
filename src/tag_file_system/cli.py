@@ -133,7 +133,12 @@ def is_network_path(path: Path) -> bool:
             import ctypes
 
             drive = os.path.splitdrive(os.path.abspath(text))[0] + "\\"
-            return ctypes.windll.kernel32.GetDriveTypeW(drive) == 4  # DRIVE_REMOTE
+            # getattr with a default: `windll` does not exist off Windows,
+            # and the type check runs on Linux too.
+            windll = getattr(ctypes, "windll", None)
+            if windll is None:  # pragma: no cover - Windows-only branch
+                return False
+            return windll.kernel32.GetDriveTypeW(drive) == 4  # DRIVE_REMOTE
         except Exception:
             return False
     try:
@@ -428,7 +433,10 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
     kwargs: dict[str, Any] = {}
     if os.name == "nt":
         kwargs["creationflags"] = (
-            subprocess.CREATE_NEW_PROCESS_GROUP | getattr(subprocess, "DETACHED_PROCESS", 0x8)
+            # Both constants are Windows-only; getattr keeps the Linux type
+            # check (and any non-Windows import of this module) quiet.
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
+            | getattr(subprocess, "DETACHED_PROCESS", 0x8)
         )
     else:
         kwargs["start_new_session"] = True
