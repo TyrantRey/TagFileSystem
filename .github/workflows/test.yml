@@ -66,6 +66,26 @@ jobs:
 
           uv run tfs --root "$root" start -d
           uv run tfs --root "$root" list
-          uv run tfs --root "$root" query -t trip | tee /dev/stderr | grep -q "note--draft.txt"
+
+          # `start -d` returns as soon as the control channel answers, which is
+          # before the first reconcile has walked the tree: poll for the file
+          # instead of racing it. (No `tee /dev/stderr` -- Git Bash on the
+          # Windows runner has no /dev/stderr.)
+          found=""
+          for _ in $(seq 1 30); do
+            out=$(uv run tfs --root "$root" query -t trip)
+            case "$out" in
+              *"note--draft.txt"*) found="$out"; break ;;
+            esac
+            sleep 1
+          done
+          if [ -z "$found" ]; then
+            echo "note--draft.txt never appeared; last query said:" >&2
+            echo "${out:-<empty>}" >&2
+            cat "$root/.tfs/daemon.out" >&2 || true
+            exit 1
+          fi
+          echo "$found"
+
           uv run tfs --root "$root" stop
           test ! -f "$root/.tfs/lock"
