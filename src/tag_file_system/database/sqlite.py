@@ -646,6 +646,22 @@ class SQLiteBackend:
         return self._row_to_tagged_file(row, tags)
 
     @locked
+    def query_file_folded(self, file_path: PathLike) -> TaggedFile | None:
+        """The active row whose key equals ``file_path`` ignoring ASCII case
+        (for case-only renames on case-insensitive filesystems)."""
+        key = self.key(file_path)
+        cursor = self.connection.cursor()
+        row = cursor.execute(
+            "SELECT * FROM files WHERE lower(path) = lower(?) AND status <> 'deleted' "
+            "ORDER BY (path = ?) DESC LIMIT 1",
+            (key, key),
+        ).fetchone()
+        if row is None:
+            return None
+        tags = self._load_tags(cursor, [row["id"]])[row["id"]]
+        return self._row_to_tagged_file(row, tags)
+
+    @locked
     def query_files(
         self,
         tags: list[str] | None = None,

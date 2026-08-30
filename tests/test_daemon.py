@@ -364,6 +364,19 @@ def test_deleted_event_for_an_existing_file_is_an_add(root: Root, daemon: Daemon
     assert ("removed", "a.txt") not in calls(daemon)
 
 
+def test_added_event_for_a_known_file_is_a_modification(root: Root, daemon: Daemon):
+    daemon.startup()
+    path = write(root, "@@copy/a.txt", "v1")
+    daemon.process_changes(added(path))
+
+    daemon.process_changes(added(path))  # unchanged: nothing
+    assert calls(daemon) == [("added", "a.txt")]
+
+    path.write_text("v2")  # write-tmp-and-rename editors report "added"
+    daemon.process_changes({(Change.added, str(path)), (Change.deleted, str(path))})
+    assert calls(daemon) == [("added", "a.txt"), ("modified", "a.txt")]
+
+
 def test_move_takes_the_new_names_tags(root: Root, daemon: Daemon):
     daemon.startup()
     old = write(root, "2024--trip/a--old.txt", "same")

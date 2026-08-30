@@ -231,7 +231,11 @@ chain stops.
   it, so a file moved while the daemon was down is a move too. Two files with
   identical content make the match arbitrary — a consequence of keying by
   content (§6.1). A `deleted` event for a path that still exists (an editor's
-  atomic save) is treated as `added`: the disk decides.
+  atomic save) is treated as `added`: the disk decides — and an `added` event
+  for a path the database already knows is a `modified` (fires only when the
+  content or the tags changed). A move onto a path that already has an
+  *active* row keeps that row (the destination wins, the source is
+  soft-deleted, no `file.move`); onto a soft-deleted row it revives it.
 - **Watch filter**: the daemon watches everything under the root except
   `.tfs/` — including names watchfiles hides by default (`.git`,
   `node_modules`, `*~`); anything reconcile would index, the watcher reports.

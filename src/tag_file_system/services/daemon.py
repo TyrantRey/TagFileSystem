@@ -45,16 +45,31 @@ from tag_file_system.services.tagging import TaggingParser
 watchfiles.main.logger.setLevel("WARNING")
 
 _PRIORITY = {Change.deleted: 0, Change.added: 1, Change.modified: 2}
-_CASE_INSENSITIVE = os.path.normcase("A") == os.path.normcase("a")
 
 
-def _exists_exactly(path: Path) -> bool:
+def _case_insensitive(directory: Path) -> bool:
+    """Whether names in ``directory`` are case-insensitive — probed, because
+    ``os.path.normcase`` says "no" on macOS where APFS says "yes"."""
+    probe = directory / f".case-probe-{os.getpid()}"
+    try:
+        probe.write_text("")
+        return probe.with_name(probe.name.upper()).exists()
+    except OSError:
+        return os.path.normcase("A") == os.path.normcase("a")
+    finally:
+        try:
+            probe.unlink()
+        except OSError:
+            pass
+
+
+def _exists_exactly(path: Path, case_insensitive: bool) -> bool:
     """``exists()`` that, on a case-insensitive filesystem, also wants the
     on-disk spelling to match: after ``a.txt`` → ``A.txt`` the old name must
     still count as deleted."""
     if not path.exists():
         return False
-    if not _CASE_INSENSITIVE:
+    if not case_insensitive:
         return True
     try:
         return str(path.resolve()) == str(path.absolute())
@@ -90,6 +105,7 @@ class Daemon:
         self.logger = logger
         self.control_enabled = control
         self.control: ControlServer | None = None
+        self.case_insensitive = _case_insensitive(root.tfs_dir)
 
         self.backend = SQLiteBackend()
         self.backend.init_database(root.db_path, root_dir=root.path)
@@ -318,7 +334,7 @@ class Daemon:
                 continue
             if zone is Zone.TFS:
                 continue
-            if change is Change.deleted and _exists_exactly(path):
+            if change is Change.deleted and _exists_exactly(path, self.case_insensitive):
                 change = Change.added  # an editor's atomic save: the disk decides
             (script_events if zone is Zone.SCRIPT else data_events).append((change, path))
 
@@ -372,8 +388,14 @@ class Daemon:
             created_hashes.add(indexed.file.file_hash)
             if moved_from is not None:
                 self._moved(moved_from, indexed, source)
-            else:
+            elif indexed.previous is None:
                 self._fire(indexed, Hook.ADDED, source)
+            elif indexed.content_changed or indexed.new_tags:
+                # "added" for a path we already know (an atomic save, a
+                # write-tmp-and-rename editor): that is a modification.
+                self._fire(indexed, Hook.MODIFIED, source)
+            else:
+                continue
             self._observe(indexed.file.path.as_posix(), in_flight_before)
 
         for path in modified:
@@ -421,18 +443,12 @@ class Daemon:
             below = self.backend.query_files(path_prefix=key.as_posix())
             if below:
                 return below
-        if _CASE_INSENSITIVE and key.parts:
+        if self.case_insensitive and key.parts:
             # A case-only rename: the resolved key already spells the new
             # case, so find the row by case-folded comparison.
-            wanted = os.path.normcase(key.as_posix())
-            parent = key.parent.as_posix()
-            siblings = (
-                self.backend.query_files(path_prefix=parent) if parent != "." else self.backend.query_files()
-            )
-            return [
-                r for r in siblings
-                if os.path.normcase(r.path.as_posix()) == wanted and r.path != key
-            ]
+            folded = self.backend.query_file_folded(key)
+            if folded is not None and folded.path != key:
+                return [folded]
         return []
 
     @staticmethod
@@ -532,9 +548,11 @@ class Daemon:
         report = ReconcileReport()
         try:
             if subtree is not None and self.root.zone(base) is not Zone.DATA:
+                self.logger.warning(f"reconcile skipped: {base} is not a data directory")
                 return report
             prefix = self.root.relative(base).as_posix()
         except OutsideRoot:
+            self.logger.warning(f"reconcile skipped: {base} is outside {self.root.path}")
             return report
         if in_flight is None:
             in_flight = self._in_flight()
