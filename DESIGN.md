@@ -143,7 +143,11 @@ def notify(problem: Problem, ctx: ActionContext) -> None: ...
 ```
 
 - One script may carry several decorated functions, each with its own
-  signature.
+  signature — but at most **one handler per hook** (per tag for `tagged`):
+  runs are keyed per `(file, add-on, hook, args)`, so a second handler on the
+  same hook could never run. A duplicate is a P1 `addon.duplicate_handler`
+  at load and is skipped; a `removed(on_move=True)` handler already covers
+  plain deletion, so one is enough.
 - File handlers receive `(path, metadata, ctx, *args)`. Args are the slug's
   positional args **coerced by pydantic** from the annotations (`"800"` →
   `800`; `dst: Remote` / `dst: TagDir` resolve paths, §4.4). Defaults allowed.
@@ -213,9 +217,18 @@ chain stops.
 - **Hashing**: sha256 on first sight and whenever `(size, mtime_ns)` differ
   from the stored row; otherwise the stored hash is reused. `files` stores
   both. A 20 GB video on SMB is not re-hashed because it was touched.
-- **Moves**: watchfiles reports delete-at-old + add-at-new. The file keeps its
-  hash, so its run keys already exist and nothing re-runs; `removed(on_move=True)`
-  handlers are the only ones that notice.
+- **Moves**: watchfiles reports delete-at-old + add-at-new. Within one batch,
+  a vanished row whose hash matches an added file is a **move**: the row is
+  re-keyed (`file.move` event, identity, tags and provenance kept), its run
+  keys already exist so nothing re-runs, and `removed(on_move=True)` handlers
+  of the `@@` functions it left are the only ones that notice. A moved
+  *directory* arrives as one added dir + one deleted dir: the new subtree is
+  reconciled (new rows), the old rows are soft-deleted, and because their
+  hashes were just seen, their `removed` handlers fire as moves, not
+  deletions.
+- **Symlinks**: paths are resolved before they are keyed, so a symlink inside
+  the root is the file it points to (one file, one key); a link whose target
+  is outside the root is `OutsideRoot` and ignored by the watcher.
 
 ## 6. Runs, provenance, problems
 
@@ -238,6 +251,18 @@ A run starts **iff no row of any status** has that key. Consequences:
 States: `queued → running → ok | failed | skipped | interrupted`. `queued` is
 unused in v1 (the loop is sequential) but reserved so a worker queue later
 needs no schema change.
+
+Two consequences of keying by content hash, by design: two files with
+identical content under the same `@@` function share a key, so the second
+file gets no run of its own (its history shows the first file's run through
+the hash); and a binding failure is keyed by the same parameter names a
+success would use, so editing the handler's signature does not resurrect a
+dead key — `ctx.retry` does (a `retry.key_changed` P1 if the names no longer
+match).
+
+Tags spelled in a file's *name* are authoritative: every re-index sets them
+again, so `ctx.untag` can only remove tags that were added through
+`ctx.tag`/the API — and those survive re-indexing.
 
 ### 6.2 What is captured per run
 
@@ -328,6 +353,7 @@ CREATE TABLE provenance (
   run_id      TEXT NOT NULL REFERENCES action_runs(id) ON DELETE CASCADE,
   kind        TEXT NOT NULL,             -- emitted | observed
   ambiguous   INTEGER NOT NULL DEFAULT 0,
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch()),   -- so "what happened to X" has an order
   PRIMARY KEY (file_id, run_id)
 );
 
@@ -344,6 +370,13 @@ CREATE TABLE problems (
 );
 ```
 
+`files.path` keys are root-relative POSIX with `.`/`..` collapsed, compared
+**case-sensitively**. Every absolute path is *resolved* (symlinks, `..`, 8.3
+names, case) before it is keyed — `Root.relative` and `SQLiteBackend.key`
+agree on this — so a key carries the on-disk casing of an existing file.
+Timestamps are epoch seconds; within one table and second, order is by
+`rowid`.
+
 Variable-arity args are a **document, not columns**: `args_json` is an object
 keyed by parameter name (the names come from the handler signature), queried
 with `json_extract(args_json, '$.dst')` and indexable by expression if ever
@@ -356,8 +389,14 @@ needed.
   open. **Old databases must load.**
 - Migration 1: create the new tables; add `files.mtime_ns`; rewrite
   `files.path` from absolute native to root-relative POSIX. Rows whose path is
-  not under the root are set to `status = 'deleted'` and reported as a single
-  P2 listing them.
+  not under the root (or cannot form a key) are set to `status = 'deleted'`
+  and reported as a single P2 listing them. When two rows end up with the
+  same key, the *active* one keeps it: a soft-deleted loser is parked under
+  `.tfs/duplicates/<id>/<key>` (a `.tfs` key, so the watcher ignores it), an
+  active loser is soft-deleted; both are listed in the same P2. A database
+  holding absolute paths refuses to migrate without a root (`MigrationError`,
+  nothing applied) — "old databases load" means *through the root they belong
+  to*, never blindly.
 
 ### Acceptance queries
 
