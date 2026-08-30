@@ -321,7 +321,9 @@ def test_failed_migration_rolls_back(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 def test_relative_key_helper(tmp_path: Path):
     assert relative_key("a/b.txt", None) == "a/b.txt"
-    assert relative_key("a\\b.txt", None) == ("a/b.txt" if Path("a\\b").parts == ("a", "b") else "a\\b.txt")
+    # posix_key splits on both separators by design, so one path yields one
+    # key on every host: a database written on Windows reads back on Linux.
+    assert relative_key("a\\b.txt", None) == "a/b.txt"
     assert relative_key("a/../b.txt", None) == "b.txt"
     assert relative_key("./a/./b.txt", None) == "a/b.txt"
     assert relative_key("../b.txt", None) is None
