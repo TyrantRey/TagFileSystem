@@ -135,6 +135,9 @@ class ActionContext:
     keep the database in step, and — when the destination is inside the
     root — record *emitted* provenance of this run. Paths may be absolute or
     root-relative.
+
+    ``file`` and ``path`` are ``None`` for a lifecycle run (``on_start`` /
+    ``on_stop``): there is no file it is about.
     """
 
     def __init__(
@@ -142,7 +145,7 @@ class ActionContext:
         runtime: Runtime,
         handle: RunHandle,
         file: TaggedFile | None,
-        path: Path,
+        path: Path | None,
         args: dict[str, Any],
     ) -> None:
         self._runtime = runtime

@@ -433,6 +433,157 @@ def test_thread_exceptions_become_problems(env):
     assert problems(env, "thread.failed")[0].run_id == run.id
 
 
+# --------------------------------------------------------------- lifecycle
+
+
+LIFECYCLE = """
+    from tag_file_system import action
+    calls = []
+
+    @action.on_start()
+    def up(ctx):
+        ctx.log("service up")
+        ctx.write("out/started.txt", ctx.action_name)
+        calls.append(("start", ctx.run_id))
+        return "up"
+
+    @action.on_stop()
+    def down(ctx):
+        calls.append(("stop", ctx.run_id))
+"""
+
+
+def test_lifecycle_hooks_run_once_per_session(env):
+    script(env, "service", LIFECYCLE)
+
+    (started,) = env.runner.on_lifecycle(Hook.ON_START)
+
+    assert started.hook is Hook.ON_START
+    assert started.status is RunStatus.OK and started.result == "up"
+    assert started.source is RunSource.LIFECYCLE
+    assert started.file_hash == "" and started.file_id is None
+    assert started.args == {"session": env.runner.session}
+    assert started.slug == "on_start"
+    # ctx works without a file: the written file is indexed and attributed.
+    written = env.backend.query_file("out/started.txt")
+    assert written is not None
+    assert [
+        p.run_id for p in env.store.query_provenance(file_path="out/started.txt")
+    ] == [started.id]
+    assert "service up" in str(env.store.query_trace(started.id))
+
+    assert env.runner.on_lifecycle(Hook.ON_START) == []  # once per session
+
+    (stopped,) = env.runner.on_lifecycle(Hook.ON_STOP)
+    assert stopped.hook is Hook.ON_STOP and stopped.status is RunStatus.OK
+    module = env.loader.addon_for("service").module
+    assert [kind for kind, _ in module.calls] == ["start", "stop"]
+
+
+def test_lifecycle_hooks_of_a_second_session_run_again(env):
+    script(env, "service", LIFECYCLE)
+    env.runner.on_lifecycle(Hook.ON_START)
+
+    env.runner.session = "another-session"
+
+    (again,) = env.runner.on_lifecycle(Hook.ON_START)
+    assert again.args == {"session": "another-session"}
+    assert len([r for r in env.store.query_runs() if r.hook is Hook.ON_START]) == 2
+
+
+def test_lifecycle_failure_is_a_failed_run_and_is_not_retried(env):
+    script(
+        env,
+        "service",
+        """
+        from tag_file_system import action
+
+        @action.on_start()
+        def up(ctx):
+            raise RuntimeError("no connection")
+        """,
+    )
+
+    (failed,) = env.runner.on_lifecycle(Hook.ON_START)
+
+    assert failed.status is RunStatus.FAILED
+    (reported,) = problems(env, "run.failed")
+    assert "the on_start hook" in reported.message and reported.file_id is None
+
+    assert env.runner.retry(failed.id) is None
+    assert problems(env, "retry.lifecycle")
+
+
+def test_lifecycle_signature_and_duplicate_rules(env):
+    script(
+        env,
+        "bad",
+        """
+        from tag_file_system import action
+
+        @action.on_start()
+        def up(path, metadata, ctx):
+            pass
+
+        @action.on_stop()
+        def down(ctx):
+            pass
+
+        @action.on_stop()
+        def down_again(ctx):
+            pass
+        """,
+    )
+    addon = env.loader.addon_for("bad")
+
+    assert [h.hook for h in addon.lifecycle_handlers] == [Hook.ON_STOP]
+    assert addon.describe()["hooks"] == ["on_stop"]
+    assert "on_start handlers take (ctx)" in problems(env, "addon.signature")[0].message
+    assert "down_again" in problems(env, "addon.duplicate_handler")[0].message
+    assert len(env.runner.on_lifecycle(Hook.ON_STOP)) == 1
+
+
+def test_lifecycle_handler_can_run_a_service_thread(env):
+    script(
+        env,
+        "service",
+        """
+        import threading
+        from tag_file_system import action
+
+        stop = threading.Event()
+        seen = []
+
+        @action.on_start()
+        def up(ctx):
+            def loop():
+                stop.wait(5)
+                seen.append("left")
+                ctx.done("served")
+            ctx.spawn(loop)
+
+        @action.on_stop()
+        def down(ctx):
+            stop.set()
+        """,
+    )
+    (started,) = env.runner.on_lifecycle(Hook.ON_START)
+    assert started.status is RunStatus.RUNNING
+
+    # a service is meant to outlive run_warn_after_seconds (0.05s here)
+    time.sleep(0.1)
+    assert env.runner.check_overdue() == []
+    assert problems(env, "run.overdue") == []
+
+    env.runner.on_lifecycle(Hook.ON_STOP)
+    env.runner.stop(timeout=5)
+
+    finished = env.store.get_run(started.id)
+    assert finished is not None
+    assert finished.status is RunStatus.OK and finished.result == "served"
+    assert env.loader.addon_for("service").module.seen == ["left"]
+
+
 # ------------------------------------------------------------------- retry
 
 

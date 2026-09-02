@@ -313,17 +313,7 @@ def list_addons(
             ),
         )
         loader.load_all()
-        actions = [
-            {
-                "name": name,
-                "script": addon.key.as_posix(),
-                "script_hash": addon.script_hash,
-                "hooks": [h.spec.describe() for h in addon.file_handlers],
-                "problem_hooks": [h.severity.value for h in addon.problem_handlers],
-                "signature": addon.signature,
-            }
-            for name, addon in sorted(loader.addons.items())
-        ]
+        actions = [addon.describe() for _, addon in sorted(loader.addons.items())]
         source = f"script/ (no daemon running: {reason})"
 
     if as_json:

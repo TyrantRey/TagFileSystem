@@ -5,9 +5,10 @@ run lifecycle (DESIGN/v0-1-0.md §4.3, §4.5, §6).
 
 Entry points the engine calls: ``on_file(hook, ...)`` for a file under one
 or more ``@@`` directories, ``on_tag(...)`` when a file acquires a tag,
-``retry(run_id)``, ``replay_undelivered()`` at start, ``check_overdue()``
-on every loop tick, ``stop(timeout)`` at shutdown. The runner is also the
-``Runtime`` behind ``ActionContext``.
+``on_lifecycle(hook)`` when the daemon starts or stops, ``retry(run_id)``,
+``replay_undelivered()`` at start, ``check_overdue()`` on every loop tick,
+``stop(timeout)`` at shutdown. The runner is also the ``Runtime`` behind
+``ActionContext``.
 
 Output capture: ``sys.stdout``/``sys.stderr`` are wrapped once per process
 by a dispatcher and a logging handler sits on the root logger; both look up
@@ -26,6 +27,7 @@ import time
 import traceback
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, ClassVar
+from uuid import uuid4
 
 from tag_file_system.addons.binding import (
     BindingError,
@@ -174,6 +176,9 @@ class ActionRunner:
         self.parser = parser if parser is not None else TaggingParser()
         self.indexer = Indexer(root, backend, self.parser)
         self.max_chain_depth = max_chain_depth
+        # This daemon session: the run key of the lifecycle hooks, which have
+        # no file to be keyed by (DESIGN/v0-3-0.md §2).
+        self.session = uuid4().hex
         self.logger = logger
         self.in_flight: dict[str, RunHandle] = {}
         self._lock = threading.RLock()
@@ -263,6 +268,42 @@ class ActionRunner:
                 runs.append(run)
         return runs
 
+    def on_lifecycle(self, hook: Hook) -> list[RunRecord]:
+        """Run every loaded add-on's ``on_start`` / ``on_stop`` handler for
+        this daemon session (DESIGN/v0-3-0.md §2).
+
+        The session is the run key, so calling this again — after a reload,
+        or when a script appears while the daemon runs — only gives a turn to
+        the add-ons that have not had one yet.
+        """
+        hook = Hook(hook)
+        if not hook.is_lifecycle:
+            raise ValueError(f"{hook.value} is not a lifecycle hook")
+        runs: list[RunRecord] = []
+        for handler in self.loader.lifecycle_handlers(hook):
+            addon = handler.addon
+            key = RunKey(
+                file_hash="",  # no file: the session is what makes it unique
+                action_name=addon.name,
+                hook=hook,
+                args={"session": self.session},
+            )
+            if self.store.find_run(key) is not None:
+                continue
+            run = self._invoke(
+                self._action_record(addon),
+                key,
+                handler.func,
+                slug=hook.value,
+                path=None,
+                file=None,
+                args={},
+                source=RunSource.LIFECYCLE,
+            )
+            if run is not None:
+                runs.append(run)
+        return runs
+
     def _chain_allowed(self, parent: RunHandle, what: str, path: Path) -> bool:
         if parent.depth + 1 <= self.max_chain_depth:
             return True
@@ -282,6 +323,17 @@ class ActionRunner:
             RunStatus.FAILED,
             RunStatus.INTERRUPTED,
         ):
+            return None
+        if previous.hook.is_lifecycle:
+            self.problem(
+                Severity.WARN,
+                "retry.lifecycle",
+                f"run {run_id} is the {previous.hook.value} run of "
+                f"{previous.action_name}: a lifecycle hook happens once per "
+                f"daemon session and is not retried",
+                action_name=previous.action_name,
+                run_id=run_id,
+            )
             return None
         if self._retry_depth(previous) >= MAX_RETRIES:
             self.problem(
@@ -367,7 +419,13 @@ class ActionRunner:
         with self._lock:
             handles = list(self.in_flight.values())
         for handle in handles:
-            if handle.warned or handle.elapsed <= threshold:
+            # A service started in on_start is meant to outlive the threshold:
+            # it ends with the session, not late (DESIGN/v0-3-0.md §5).
+            if (
+                handle.warned
+                or handle.run.hook.is_lifecycle
+                or handle.elapsed <= threshold
+            ):
                 continue
             handle.warned = True
             overdue.append(handle)
@@ -483,6 +541,36 @@ class ActionRunner:
             )
             return run
 
+        return self._invoke(
+            record,
+            key,
+            lambda ctx: handler.func(abs_path, file.metadata, ctx, **bound.kwargs),
+            slug=slug,
+            path=abs_path,
+            file=file,
+            args=bound.kwargs,
+            source=source,
+            parent=parent,
+            retry_of=retry_of,
+        )
+
+    def _invoke(
+        self,
+        record: ActionRecord,
+        key: RunKey,
+        call: Callable[[ActionContext], Any],
+        *,
+        slug: str,
+        path: Path | None,
+        file: TaggedFile | None,
+        args: dict[str, Any],
+        source: RunSource,
+        parent: RunHandle | None = None,
+        retry_of: str | None = None,
+    ) -> RunRecord | None:
+        """Start the run, call the handler with its output captured into the
+        trace, and finish it. Everything a lifecycle run shares with a file
+        run is here; only ``call`` knows the handler's shape."""
         try:
             run = self.store.start_run(
                 record,
@@ -500,12 +588,12 @@ class ActionRunner:
         handle.sink = lambda line, h=handle: self.trace(h, TraceKind.LOG, line)
         with self._lock:
             self.in_flight[run.id] = handle
-        ctx = ActionContext(self, handle, file, abs_path, bound.kwargs)
+        ctx = ActionContext(self, handle, file, path, args)
         self._ensure_capture()
         streams = (sys.stdout, sys.stderr)
         _push(handle)
         try:
-            result = handler.func(abs_path, file.metadata, ctx, **bound.kwargs)
+            result = call(ctx)
         except KeyboardInterrupt:
             self._finish(
                 handle, RunStatus.INTERRUPTED, error="interrupted by the operator"
@@ -565,11 +653,12 @@ class ActionRunner:
         if already_final:
             return run  # interrupted/failed meanwhile: that problem was raised then
         file_path = self._path_of_run(run)
+        subject = self._subject(run, file_path)
         if status is RunStatus.OK:
             self.problem(
                 Severity.INFO,
                 "run.ok",
-                f"{run.action_name} finished on {file_path or run.file_hash}",
+                f"{run.action_name} finished on {subject}",
                 action_name=run.action_name,
                 file_path=file_path,
                 run_id=run.id,
@@ -578,7 +667,7 @@ class ActionRunner:
             self.problem(
                 Severity.ERR,
                 "run.failed",
-                f"{run.action_name} failed on {file_path or run.file_hash}: "
+                f"{run.action_name} failed on {subject}: "
                 f"{(error or '').splitlines()[0] if error else status}",
                 action_name=run.action_name,
                 file_path=file_path,
@@ -588,7 +677,7 @@ class ActionRunner:
             self.problem(
                 Severity.CRIT,
                 "run.interrupted",
-                f"{run.action_name} on {file_path or run.file_hash} was interrupted: {error}",
+                f"{run.action_name} on {subject} was interrupted: {error}",
                 action_name=run.action_name,
                 file_path=file_path,
                 run_id=run.id,
@@ -891,6 +980,8 @@ class ActionRunner:
         return depth
 
     def _file_for(self, run: RunRecord) -> TaggedFile | None:
+        if not run.file_hash:
+            return None  # a lifecycle run is about the daemon, not a file
         for candidate in self.backend.query_files(file_hash=run.file_hash):
             if run.file_id is None or candidate.file_id == run.file_id:
                 return candidate
@@ -899,6 +990,13 @@ class ActionRunner:
     def _path_of_run(self, run: RunRecord) -> Path | None:
         file = self._file_for(run)
         return file.original_path if file is not None else None
+
+    def _subject(self, run: RunRecord, file_path: Path | None) -> str:
+        """What the run was about, for a problem message: its file when there
+        is one, its hash when the file is gone, else the hook itself."""
+        if file_path is not None:
+            return str(file_path)
+        return run.file_hash or f"the {run.hook.value} hook"
 
     def _directories_tagged(self, tag: str) -> list[Path]:
         found: list[Path] = []

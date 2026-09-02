@@ -3,11 +3,12 @@
 """The daemon: one watcher per root (DESIGN/v0-1-0.md §5, §6.3, §8).
 
 ``startup()`` takes the lock, closes runs a crash left open, loads the
-add-ons, replays undelivered problems and reconciles the data tree;
-``run_forever()`` then feeds watcher batches to ``process_changes()`` until
-``request_stop()``; ``shutdown()`` waits for in-flight runs, releases the
-lock and closes the database. ``process_changes`` and ``reconcile`` are
-callable directly (tests, ``tfs`` commands).
+add-ons, gives them their ``on_start``, replays undelivered problems and
+reconciles the data tree; ``run_forever()`` then feeds watcher batches to
+``process_changes()`` until ``request_stop()``; ``shutdown()`` runs
+``on_stop``, waits for in-flight runs, releases the lock and closes the
+database. ``process_changes`` and ``reconcile`` are callable directly
+(tests, ``tfs`` commands).
 """
 
 import os
@@ -133,6 +134,7 @@ class Daemon:
         self.lock = Lock(root)
         self._stop = threading.Event()
         self.started = False
+        self._lifecycle_started = False  # on_start has had its turn this session
 
     # ------------------------------------------------------- load problems
 
@@ -161,13 +163,22 @@ class Daemon:
         return self.runner.problem(severity, kind, message, action_name=action_name)
 
     def _load(self, path: Path | None = None) -> list:
-        """Load one script (or all) and refresh its recorded problems."""
+        """Load one script (or all) and refresh its recorded problems.
+
+        Once the session has started, an add-on that appears (or comes back
+        from a failed import) gets its ``on_start`` here; the run key makes
+        that a no-op for the add-ons that already had theirs.
+        """
         if path is None:
             self._load_problems.clear()
-            return self.loader.load_all()
-        self._load_problems.pop(path.name, None)
-        addon = self.loader.load(path)
-        return [addon] if addon is not None else []
+            loaded = self.loader.load_all()
+        else:
+            self._load_problems.pop(path.name, None)
+            addon = self.loader.load(path)
+            loaded = [addon] if addon is not None else []
+        if self._lifecycle_started:
+            self.runner.on_lifecycle(Hook.ON_START)
+        return loaded
 
     def load_problems(self) -> list[dict]:
         return [p for problems in self._load_problems.values() for p in problems]
@@ -226,6 +237,11 @@ class Daemon:
                 )
                 self.control.start()
             self._load()
+            # The add-ons are up and no file has been looked at yet: an
+            # on_start handler prepares what the rest of the session (the
+            # replayed problems included) is about to use.
+            self._lifecycle_started = True
+            self.runner.on_lifecycle(Hook.ON_START)
             self.runner.replay_undelivered()
             self.reconcile()
         except BaseException:
@@ -233,6 +249,7 @@ class Daemon:
                 self.control.stop()
                 self.control = None
             try:
+                self._stop_addons()
                 self.runner.stop(self.config.daemon.stop_timeout_seconds)
             finally:
                 self.lock.release()
@@ -325,11 +342,24 @@ class Daemon:
     def tick(self) -> None:
         self.runner.check_overdue()
 
+    def _stop_addons(self) -> None:
+        """``on_stop`` for every loaded add-on, before in-flight runs are
+        waited for: a handler that shuts a service down must be able to end
+        the run its ``on_start`` left open."""
+        if not self._lifecycle_started:
+            return
+        self._lifecycle_started = False
+        try:
+            self.runner.on_lifecycle(Hook.ON_STOP)
+        except Exception as e:
+            self.logger.warning(f"on_stop skipped: {type(e).__name__}: {e}")
+
     def shutdown(self) -> None:
         if not self.backend.is_open:
             return
         self.logger.info("Stopping daemon")
         try:
+            self._stop_addons()
             self.runner.stop(self.config.daemon.stop_timeout_seconds)
         finally:
             if self.control is not None:
@@ -387,19 +417,7 @@ class Daemon:
 
     def describe_addons(self) -> list[dict]:
         """``tfs list``: every loaded add-on with its hooks and signature."""
-        result = []
-        for name, addon in sorted(self.loader.addons.items()):
-            result.append(
-                {
-                    "name": name,
-                    "script": addon.key.as_posix(),
-                    "script_hash": addon.script_hash,
-                    "hooks": [h.spec.describe() for h in addon.file_handlers],
-                    "problem_hooks": [h.severity.value for h in addon.problem_handlers],
-                    "signature": addon.signature,
-                }
-            )
-        return result
+        return [addon.describe() for _, addon in sorted(self.loader.addons.items())]
 
     # -------------------------------------------------------------- events
 
@@ -628,7 +646,14 @@ class Daemon:
             for p in self.store.query_provenance(file_path=key, include_deleted=True)
             if p.kind is ProvenanceKind.EMITTED
         }
-        handles = [h for h in handles if h.id not in emitted and not h.finished]
+        handles = [
+            h
+            for h in handles
+            # A lifecycle run is in flight for the whole session, so "it was
+            # running" says nothing about who changed a file: attributing to
+            # it would make every change of every session ambiguous.
+            if h.id not in emitted and not h.finished and not h.run.hook.is_lifecycle
+        ]
         if not handles:
             return
         ambiguous = len(handles) > 1

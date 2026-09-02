@@ -97,6 +97,41 @@ def test_load_all_discovers_handlers(root: Root, loader: AddonLoader, problems):
     assert problems == []
 
 
+def test_lifecycle_handlers_are_collected_and_described(
+    root: Root, loader: AddonLoader, problems
+):
+    write(
+        root,
+        "service.py",
+        """
+        from tag_file_system import action
+
+        @action.on_start()
+        def up(ctx):
+            pass
+
+        @action.on_stop()
+        def down(ctx):
+            pass
+        """,
+    )
+
+    loader.load_all()
+
+    addon = loader.addon_for("service")
+    assert addon is not None
+    assert addon.hooks == [Hook.ON_START, Hook.ON_STOP]
+    assert [h.name for h in loader.lifecycle_handlers(Hook.ON_START)] == ["up"]
+    assert [h.name for h in loader.lifecycle_handlers(Hook.ON_STOP)] == ["down"]
+    assert addon.describe()["hooks"] == ["on_start", "on_stop"]
+    assert addon.signature["on_start"] == {
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+    assert problems == []  # a lifecycle-only add-on is not "empty"
+
+
 def test_helpers_and_bad_names_are_not_addons(
     root: Root, loader: AddonLoader, problems
 ):
