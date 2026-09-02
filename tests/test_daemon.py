@@ -656,6 +656,109 @@ def test_shutdown_interrupts_and_releases(root: Root):
     backend.close()
 
 
+SERVICE = """
+    from tag_file_system import action
+    events = []
+
+    @action.on_start()
+    def up(ctx):
+        events.append("start")
+
+    @action.on_stop()
+    def down(ctx):
+        events.append("stop")
+"""
+
+
+def events(daemon: Daemon, name: str = "service") -> list:
+    addon = daemon.loader.addon_for(name)
+    return addon.module.events if addon is not None else []
+
+
+def lifecycle_runs(daemon: Daemon, hook: Hook) -> list:
+    return [r for r in daemon.store.query_runs() if r.hook is hook]
+
+
+def test_on_start_and_on_stop_bracket_the_session(root: Root):
+    (root.script_dir / "service.py").write_text(
+        textwrap.dedent(SERVICE), encoding="utf-8"
+    )
+    write(root, "@@copy/a.txt", "a")
+    daemon = Daemon(root)
+
+    daemon.startup()
+
+    # before any file was looked at, and once only
+    assert events(daemon) == ["start"]
+    assert calls(daemon) == [("added", "a.txt")]
+    daemon.reload()  # a fresh module, but the same session: no second on_start
+    assert events(daemon) == [] and len(lifecycle_runs(daemon, Hook.ON_START)) == 1
+    (started,) = lifecycle_runs(daemon, Hook.ON_START)
+    assert started.status is RunStatus.OK and started.source is RunSource.LIFECYCLE
+
+    daemon.shutdown()
+
+    assert events(daemon) == ["stop"]
+    backend = SQLiteBackend()
+    backend.init_database(root.db_path, root_dir=root.path)
+    store = ActionStore(backend)
+    (stopped,) = [r for r in store.query_runs() if r.hook is Hook.ON_STOP]
+    assert stopped.status is RunStatus.OK and stopped.started_at >= started.started_at
+    backend.close()
+
+
+def test_a_script_added_while_running_gets_its_on_start(root: Root, daemon: Daemon):
+    daemon.startup()
+
+    script = root.script_dir / "service.py"
+    script.write_text(textwrap.dedent(SERVICE), encoding="utf-8")
+    daemon.process_changes(added(script))
+
+    assert events(daemon) == ["start"]
+    # an edit reloads the add-on but does not start a second session for it
+    script.write_text(
+        textwrap.dedent(SERVICE).replace('"stop"', '"restop"'), encoding="utf-8"
+    )
+    daemon.process_changes({(Change.modified, str(script))})
+    assert events(daemon) == [] and len(lifecycle_runs(daemon, Hook.ON_START)) == 1
+
+    daemon.shutdown()
+    assert events(daemon) == ["restop"]
+
+
+def test_a_service_run_does_not_observe_every_change(root: Root):
+    (root.script_dir / "service.py").write_text(
+        "import threading\n"
+        "from tag_file_system import action\n"
+        "@action.on_start()\n"
+        "def up(ctx):\n"
+        "    ctx.spawn(lambda: threading.Event().wait(30))\n",
+        encoding="utf-8",
+    )
+    daemon = Daemon(root)
+    daemon.startup()
+    assert daemon.runner.in_flight  # the service run is in flight all session
+
+    daemon.process_changes(added(write(root, "@@copy/a.txt", "a")))
+
+    assert not problems(daemon, "observed")
+    assert not daemon.store.query_provenance(file_path="@@copy/a.txt")
+    daemon.shutdown()
+
+
+def test_a_daemon_that_never_started_runs_no_lifecycle_hooks(root: Root):
+    (root.script_dir / "service.py").write_text(
+        textwrap.dedent(SERVICE), encoding="utf-8"
+    )
+    daemon = Daemon(root)
+    daemon._load()
+    assert not [r for r in daemon.store.query_runs() if r.hook.is_lifecycle]
+
+    daemon.shutdown()
+
+    assert events(daemon) == []
+
+
 def test_run_forever_stops_on_request(root: Root):
     import threading
 

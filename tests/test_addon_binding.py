@@ -200,6 +200,10 @@ def test_bare_decorators_are_type_errors():
         action.tagged(lambda p, m, c: None)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="parentheses"):
         action.warn(lambda p, c: None)
+    with pytest.raises(TypeError, match="parentheses"):
+        action.on_start(lambda c: None)
+    with pytest.raises(TypeError, match="parentheses"):
+        action.on_stop(lambda c: None)
     with pytest.raises(TypeError):
         action.removed(on_move="yes")  # type: ignore[arg-type]
     with pytest.raises(TypeError):
