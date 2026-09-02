@@ -51,7 +51,7 @@ uv run tfs stop
 `tfs start -d` runs the daemon in the background (output in
 `.tfs/daemon.out`); every command accepts `--root <dir>` instead of
 discovering the root from the current directory. `tfs --version` prints the
-version and the commit it runs from (`0.2.0 (abc1234)`).
+version and the commit it runs from (`0.3.0 (abc1234)`).
 
 ## How to use
 
@@ -121,7 +121,7 @@ or activate the virtual environment once and call `tfs` directly. `--root DIR`
 | `tfs upgrade` | `--to TAG`, `--dry-run`, `-y/--yes`, `--skip-tests`, `--wait SEC` | Move the checkout to the newest release tag (or `--to`), snapshot every root, run the suite, restart the daemons, revert on failure. `--yes` consents to a schema change; `--wait` is how long to let in-flight runs finish first. |
 | `tfs backup list` | `--json` | The snapshots in `.tfs/backups/`, newest first, with size and origin tag. |
 | `tfs backup prune` | `--keep N` (default 3), `--dry-run`, `-y/--yes` | Delete all but the newest `N` snapshots; asks first unless `--yes`. |
-| `tfs --version` | | `0.2.0 (abc1234)`: the version in `pyproject.toml` and the commit of the checkout. |
+| `tfs --version` | | `0.3.0 (abc1234)`: the version in `pyproject.toml` and the commit of the checkout. |
 
 Exit status is `0` on success and `1` on any error (no root, no daemon
 where one is needed, a refused lock, a failed check). `tfs query` exits
@@ -167,12 +167,23 @@ def gone(path, metadata, ctx, suffix: str = ".jpg", dst: action.Remote = None):
 @action.err()
 def notify(problem, ctx):                       # every P1 and P0
     ctx.log(f"{problem.kind}: {problem.message}")
+
+@action.on_start()                              # the daemon is up, before any file
+def up(ctx):                                    # (@action.on_stop() when it goes down)
+    ctx.log("ready")
 ```
 
 - Hooks: `added`, `modified`, `removed(on_move=...)`, `tagged("x")`; problem
-  handlers `crit`, `err`, `warn`, `info` receive their level and above.
+  handlers `crit`, `err`, `warn`, `info` receive their level and above;
+  `on_start` / `on_stop` bracket the daemon session.
 - Arguments after `(path, metadata, ctx)` come from the name, coerced by
-  their annotations; one handler per hook per add-on.
+  their annotations; one handler per hook per add-on. Problem handlers take
+  `(problem, ctx)`, lifecycle handlers `(ctx)` — they have no file, so
+  `ctx.file` and `ctx.path` are `None`.
+- `on_start` runs once per daemon session per add-on: at `tfs start`, and as
+  soon as a script that appears later is loaded. `on_stop` runs at shutdown,
+  before in-flight runs are waited for — the place to signal a service thread
+  an `on_start` spawned (`ctx.spawn` … `ctx.done()`) that it should leave.
 - `ctx` offers `copy/move/write/delete/emit`, `record/log`, `spawn/done` for
   background work, `tag/untag`, `query`, `problem`, `retry`, `resolve`.
 - Scripts are hot-reloaded when they change; helpers are `_name.py`.
@@ -292,5 +303,6 @@ describes.
 Design documents carry the same numbers: `DESIGN/v{A}-{B}-{C}.md` is the
 approved design for that release — [`v0-1-0.md`](DESIGN/v0-1-0.md) is what
 0.1.0 shipped, [`v0-2-0.md`](DESIGN/v0-2-0.md) is self-update, shipped in
-0.2.0. Releases are annotated tags `vA.B.C` on `origin`; that is what
-`tfs update` looks for.
+0.2.0, [`v0-3-0.md`](DESIGN/v0-3-0.md) is the `on_start` / `on_stop` hooks,
+shipped in 0.3.0. Releases are annotated tags `vA.B.C` on `origin`; that is
+what `tfs update` looks for.
