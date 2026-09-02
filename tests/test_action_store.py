@@ -623,3 +623,48 @@ def test_store_joins_backend_transactions(
     assert backend.query_file("a.txt") is None
     assert store.query_runs() == []
     assert not backend.connection.in_transaction
+
+
+# ---------------------------------------------------------------- upgrades
+
+
+def test_runs_are_stamped_with_the_code_that_produced_them(
+    store: ActionStore, action: ActionRecord
+):
+    from tag_file_system.version import COMMIT, VERSION
+
+    run = store.start_run(action, key_for(), "copy", None, RunSource.WATCH)
+    assert (run.code_version, run.code_hash) == (VERSION, COMMIT)
+    assert store.get_run(run.id) == run
+
+
+def test_record_and_query_upgrades(store: ActionStore):
+    assert store.query_upgrades() == []
+    first = store.record_upgrade(
+        from_tag=None,
+        from_hash="a" * 40,
+        to_tag="v0.2.0",
+        to_hash="b" * 40,
+        schema_before=1,
+        schema_after=2,
+        started_at=datetime(2026, 9, 2, 4, 0, tzinfo=UTC),
+        tests_run=10,
+        tests_passed=9,
+        tests_skipped=1,
+        snapshot_path=".tfs/backups/x.db",
+    )
+    second = store.record_upgrade(
+        from_tag="v0.2.0",
+        from_hash="b" * 40,
+        to_tag="v0.3.0",
+        to_hash="c" * 40,
+        schema_before=2,
+        schema_after=2,
+        started_at=1700000000.0,
+    )
+    assert first.from_tag is None and first.tests_passed == 9
+    assert second.tests_run is None and second.started_at == datetime.fromtimestamp(
+        1700000000, UTC
+    )
+    assert [u.to_tag for u in store.query_upgrades()] == ["v0.3.0", "v0.2.0"]
+    assert store.query_upgrades(limit=1) == [second]

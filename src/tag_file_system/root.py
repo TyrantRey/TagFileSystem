@@ -58,11 +58,12 @@ class OutsideRoot(RootError):
 
 
 class LockHeld(RootError):
-    """Another live daemon holds ``.tfs/lock``."""
+    """Another live daemon (or a running upgrade) holds ``.tfs/lock``."""
 
     def __init__(self, info: "LockInfo") -> None:
+        what = "being upgraded" if info.upgrade else "locked"
         super().__init__(
-            f"root is locked by pid {info.pid} on {info.hostname} "
+            f"root is {what} by pid {info.pid} on {info.hostname} "
             f"(since {info.created_at_text})"
         )
         self.info = info
@@ -269,6 +270,12 @@ class LockInfo:
     # reach it without (or despite) config.toml.
     port: int | None = None
     bind: str | None = None
+    # ``tfs upgrade`` (DESIGN/v0-2-0.md §7 step 3) holds the lock while it
+    # swaps the code: no daemon may start and no command may open the
+    # database directly until the marker is gone. Its pid is the
+    # orchestrator's, so a marker left by a crashed upgrade goes stale like
+    # any other lock.
+    upgrade: bool = False
 
     @property
     def age(self) -> float:
@@ -298,6 +305,7 @@ class LockInfo:
                 "created_at": self.created_at,
                 "port": self.port,
                 "bind": self.bind,
+                "upgrade": self.upgrade,
             }
         )
 
@@ -360,6 +368,7 @@ class Lock:
             created_at=float(created_at),
             port=port,
             bind=bind,
+            upgrade=data.get("upgrade") is True,
         )
 
     def is_stale(self, info: LockInfo) -> bool:

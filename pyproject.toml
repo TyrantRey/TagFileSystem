@@ -1,13 +1,13 @@
 [project]
 name = "tag_file_system"
-version = "0.1.1"
+version = "0.2.0"
 description = "Tags and add-on functions driven by file names, with a queryable SQLite log"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["pydantic>=2.12.5", "typer>=0.21.1", "watchfiles>=1.1.1"]
 
 [project.scripts]
-tfs = "tag_file_system.cli:app"
+tfs = "tag_file_system.__main__:main"
 
 [dependency-groups]
 dev = ["pytest>=9.1.1", "ruff>=0.15.10", "ty>=0.0.15"]

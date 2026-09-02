@@ -28,6 +28,7 @@ EXPECTED_TABLES = {
     "action_trace",
     "provenance",
     "problems",
+    "upgrades",
 }
 
 # The schema as the pre-versioning code created it (absolute native paths).
@@ -94,7 +95,7 @@ def test_fresh_database_is_at_current_version(tmp_path: Path):
     backend = SQLiteBackend()
     backend.init_database(tmp_path / "fresh.db", root_dir=tmp_path)
 
-    assert user_version(backend.connection) == SCHEMA_VERSION == 1
+    assert user_version(backend.connection) == SCHEMA_VERSION == 2
     assert tables(backend.connection) == EXPECTED_TABLES
     assert "mtime_ns" in columns(backend.connection, "files")
     assert backend.migration_report is not None
@@ -153,7 +154,7 @@ def test_legacy_database_is_migrated_in_place(tmp_path: Path):
 
     report = backend.migration_report
     assert report is not None
-    assert (report.from_version, report.to_version) == (0, 1)
+    assert (report.from_version, report.to_version) == (0, SCHEMA_VERSION)
     assert report.relativized == 2  # f1 and f4
     assert report.outside_root == [outside]
     assert tables(backend.connection) == EXPECTED_TABLES

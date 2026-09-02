@@ -191,6 +191,10 @@ class RunRecord(BaseModel):
     retry_of: str | None = None
     started_at: datetime
     finished_at: datetime | None = None
+    # The code that produced the run (DESIGN/v0-2-0.md §3); None on rows
+    # written before schema version 2.
+    code_version: str | None = None
+    code_hash: str | None = None
 
     @property
     def key(self) -> RunKey:
@@ -228,6 +232,26 @@ class ProblemRecord(BaseModel):
     run_id: str | None = None
     occurred_at: datetime
     delivered_at: datetime | None = None
+
+
+class UpgradeRecord(BaseModel):
+    """One completed self-update (DESIGN/v0-2-0.md §9), as recorded in the
+    root it migrated. ``tests_*`` are ``None`` when the suite was skipped."""
+
+    id: str
+    from_tag: str | None
+    from_hash: str
+    to_tag: str
+    to_hash: str
+    schema_before: int
+    schema_after: int
+    tests_run: int | None = None
+    tests_passed: int | None = None
+    tests_skipped: int | None = None
+    snapshot_path: str | None = None
+    outcome: str
+    started_at: datetime
+    finished_at: datetime
 
 
 class EventRecord(BaseModel):

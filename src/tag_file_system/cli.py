@@ -1,14 +1,22 @@
 # Code by AkinoAlice@TyrantRey
 
-"""The ``tfs`` command (DESIGN/v0-1-0.md §8): exactly six commands.
+"""The ``tfs`` command (DESIGN/v0-1-0.md §8, DESIGN/v0-2-0.md §4).
 
     tfs init [dir]      tfs list      tfs query -t a -t b ...
     tfs reload          tfs start [-d] [--force]      tfs stop
+    tfs update [--json]                tfs upgrade [--to TAG] [--dry-run] ...
+    tfs backup list | prune [--keep N] tfs --version
 
 The CLI is client-first: it talks to the running daemon over the control
 channel; when no daemon answers and the database is on a local disk it
 reads the database directly; over a network mount with no daemon it
-refuses (WAL over SMB/NFS is unsafe).
+refuses (WAL over SMB/NFS is unsafe). While ``tfs upgrade`` holds a root
+(its marker in ``.tfs/lock``) nothing opens the database directly.
+
+``tfs upgrade`` itself is dispatched by ``tag_file_system.__main__`` to the
+standard-library ``updater`` before this module (and pydantic) is imported;
+the command below exists for ``--help`` and ``python -m tag_file_system.cli``.
+Every root-scoped command records its root in the registry (§5).
 """
 
 import json
@@ -43,12 +51,29 @@ from tag_file_system.services.control import (
     ControlUnavailable,
     file_payload,
 )
+from tag_file_system.updater import (
+    KEEP_DEFAULT,
+    UpdateError,
+    backups_dir,
+    check,
+    human_size,
+    list_backups,
+    prune_backups,
+    register_root,
+    registry_path,
+)
+from tag_file_system.version import COMMIT, VERSION, describe, short
 
 app = typer.Typer(
     help="TagFileSystem: tags and add-on functions driven by file names.",
     no_args_is_help=True,
     add_completion=False,
 )
+backup_app = typer.Typer(
+    help="Database snapshots taken by `tfs upgrade` (.tfs/backups/).",
+    no_args_is_help=True,
+)
+app.add_typer(backup_app, name="backup")
 
 RootOption = Annotated[
     Path | None,
@@ -67,9 +92,21 @@ def _fail(message: str, code: int = 1) -> typer.Exit:
 
 def _root(root: Path | None) -> Root:
     try:
-        return Root.discover(root) if root is not None else Root.discover()
+        found = Root.discover(root) if root is not None else Root.discover()
     except NotARoot as e:
         raise _fail(f"{e} (run `tfs init` first)")
+    register_root(found.path)  # so `tfs upgrade` knows every root on this machine
+    return found
+
+
+def _upgrade_in_progress(holder: LockInfo | None) -> str | None:
+    """A ``tfs upgrade`` holds the root (DESIGN/v0-2-0.md §7 step 3)."""
+    if holder is None or not holder.upgrade:
+        return None
+    return (
+        f"an upgrade is in progress (pid {holder.pid} on {holder.hostname}, "
+        f"since {holder.created_at_text})"
+    )
 
 
 def _config(root: Root) -> Config:
@@ -170,7 +207,12 @@ def is_network_path(path: Path) -> bool:
 
 
 def _open_backend(root: Root):
-    """Direct database access for when no daemon answers."""
+    """Direct database access for when no daemon answers. Never while an
+    upgrade holds the root: opening the database would migrate it out from
+    under the upgrade (DESIGN/v0-2-0.md §11)."""
+    busy = _upgrade_in_progress(Lock(root).holder())
+    if busy is not None:
+        raise _fail(f"{busy}; the database is not available until it finishes")
     if is_network_path(root.path):
         raise _fail(
             "no daemon answers and the root is on a network mount; start the daemon "
@@ -229,6 +271,7 @@ def init(
     backend = SQLiteBackend()
     backend.init_database(root.db_path, root_dir=root.path)
     backend.close()
+    register_root(root.path)
     typer.echo(f"Initialized TagFileSystem root at {root.path}")
     typer.echo(f"  add-ons: {root.script_dir}")
     typer.echo(f"  config:  {root.config_path}")
@@ -248,15 +291,21 @@ def list_addons(
     where = _root(root)
     problems: list[dict[str, Any]] = []
     holder = Lock(where).holder()
+    version, commit = VERSION, COMMIT
     try:
         payload = _client(where, holder).actions()
         actions = payload["actions"]
         problems = payload.get("problems", [])
+        # The daemon's own identity: what actually runs, not what the CLI is.
+        version, commit = payload.get("version", version), payload.get("hash", commit)
         source = "daemon"
     except ControlError as e:
         reason = _unreachable(e, holder)
         if reason is None:
             raise _fail(str(e))
+        busy = _upgrade_in_progress(holder)
+        if busy is not None:
+            raise _fail(f"{busy}; the root is not available until it finishes")
         loader = AddonLoader(
             where,
             report=lambda severity, kind, message, *, action_name=None: problems.append(
@@ -280,10 +329,18 @@ def list_addons(
     if as_json:
         typer.echo(
             json.dumps(
-                {"source": source, "actions": actions, "problems": problems}, indent=2
+                {
+                    "source": source,
+                    "version": version,
+                    "hash": commit,
+                    "actions": actions,
+                    "problems": problems,
+                },
+                indent=2,
             )
         )
         return
+    typer.echo(f"tfs {version} ({short(commit)})")
     typer.echo(f"add-ons from {source}:")
     if not actions:
         typer.echo("  (none)")
@@ -414,6 +471,9 @@ def reload(root: RootOption = None) -> None:
         reason = _unreachable(e, holder)
         if reason is None:
             raise _fail(str(e))
+        busy = _upgrade_in_progress(holder)
+        if busy is not None:
+            raise _fail(f"{busy}; the daemon is down until it finishes")
         if holder is not None and holder.is_live_local():
             raise _fail(
                 f"cannot reach the daemon holding this root (pid {holder.pid}): {reason}"
@@ -443,6 +503,9 @@ def start(
 ) -> None:
     """Reconcile the root and watch it (foreground unless -d)."""
     where = _root(root)
+    busy = _upgrade_in_progress(Lock(where).holder())
+    if busy is not None:
+        raise _fail(f"{busy}; the daemon restarts when it finishes")
     config = _config(where)
     try:
         where.read_token()
@@ -464,6 +527,8 @@ def start(
     try:
         daemon.startup(force=force)
     except LockHeld as e:
+        if e.info.upgrade:
+            raise _fail(f"{e}; the daemon restarts when the upgrade finishes")
         if e.info.is_live_local():
             raise _fail(
                 f"{e}; that process is running on this machine — `tfs stop` it first"
@@ -597,6 +662,9 @@ def stop(
     where = _root(root)
     lock = Lock(where)
     holder = lock.holder()
+    busy = _upgrade_in_progress(holder)
+    if busy is not None:
+        raise _fail(f"{busy}; it stops and restarts the daemon itself")
     if timeout is None:
         try:
             timeout = (
@@ -678,16 +746,274 @@ def _signal_stop(pid: int) -> bool | None:
     return True
 
 
+# ---------------------------------------------------------------- update
+
+
+@app.command()
+def update(
+    root: RootOption = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Machine-readable output.")
+    ] = False,
+) -> None:
+    """Fetch the release tags from origin and report; change nothing.
+
+    Exit status is non-zero only when the check itself fails (no git, an
+    unreachable origin, a dirty checkout): "an update is available" is exit
+    0 with `available: true` in --json (DESIGN/v0-2-0.md §4).
+    """
+    where = _root(root)
+    try:
+        report = check(where.path)
+    except UpdateError as e:
+        raise _fail(str(e))
+    if as_json:
+        typer.echo(json.dumps(report.as_dict(), indent=2))
+        return
+    typer.echo(f"current   {report.head.describe(report.current_version)}")
+    if report.target is None:
+        typer.echo("latest    (origin has no release tags)")
+    else:
+        state = "available" if report.available else "nothing newer"
+        typer.echo(
+            f"latest    {report.target} = {report.to_version} "
+            f"({short(report.to_hash)}), {state}"
+        )
+        if report.to_schema != report.current_schema:
+            typer.echo(f"schema    {report.current_schema} -> {report.to_schema}")
+    typer.echo(f"roots     {len(report.roots)} registered in {registry_path()}")
+    for state in report.roots:
+        daemon = f"daemon pid {state.pid}" if state.running else "no daemon"
+        schema = (
+            "no database"
+            if state.user_version is None
+            else f"schema {state.user_version}"
+        )
+        line = f"  {state.path}: {daemon}, {schema}"
+        if state.skipped:
+            line += f", skipped: {state.skipped}"
+        typer.echo(line)
+    if report.available:
+        typer.echo("run `tfs upgrade` to apply it")
+
+
+@app.command()
+def upgrade(
+    root: RootOption = None,
+    to: Annotated[
+        str | None,
+        typer.Option(
+            "--to", metavar="TAG", help="A release tag on origin (default: the newest)."
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Print the plan and change nothing.")
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes", "-y", help="Consent to a schema change without a prompt."
+        ),
+    ] = False,
+    skip_tests: Annotated[
+        bool,
+        typer.Option("--skip-tests", help="Skip the test suite (and nothing else)."),
+    ] = False,
+    wait: Annotated[
+        float | None,
+        typer.Option(
+            "--wait",
+            metavar="SEC",
+            help="Seconds to wait for in-flight runs (default: stop_timeout_seconds).",
+        ),
+    ] = None,
+) -> None:
+    """Move the checkout to a release tag and restart the daemons.
+
+    Every registered root is snapshotted first; a failed upgrade is
+    reverted (DESIGN/v0-2-0.md §7-8). The `tfs` command routes here before
+    importing anything else; `python -m tag_file_system.cli upgrade` does
+    not, which on Windows can leave `uv sync` unable to replace a
+    dependency this process has loaded.
+    """
+    from tag_file_system.updater import main as upgrade_main
+
+    argv: list[str] = []
+    if root is not None:
+        argv += ["--root", str(root)]
+    if to is not None:
+        argv += ["--to", to]
+    if dry_run:
+        argv.append("--dry-run")
+    if yes:
+        argv.append("--yes")
+    if skip_tests:
+        argv.append("--skip-tests")
+    if wait is not None:
+        argv += ["--wait", str(wait)]
+    raise typer.Exit(upgrade_main(argv))
+
+
+@app.command("record-upgrade", hidden=True)
+def record_upgrade(
+    payload: Annotated[Path, typer.Argument(help="JSON written by tfs upgrade.")],
+    root: RootOption = None,
+) -> None:
+    """Write the `upgrades` row of this root (DESIGN/v0-2-0.md §9); only
+    `tfs upgrade` calls this, as the new code, after the daemon migrated."""
+    where = _root(root)
+    try:
+        data = json.loads(payload.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise _fail(f"cannot read {payload}: {e}")
+    if not isinstance(data, dict):
+        raise _fail(f"{payload} does not hold a JSON object")
+    from tag_file_system.database.migrations import user_version
+
+    backend, store = _open_backend(where)
+    try:
+        report = backend.migration_report
+        before = data.get("schema_before")
+        if before is None and report is not None:
+            before = report.from_version
+        record = store.record_upgrade(
+            from_tag=data.get("from_tag"),
+            from_hash=str(data["from_hash"]),
+            to_tag=str(data["to_tag"]),
+            to_hash=str(data["to_hash"]),
+            schema_before=int(before) if before is not None else 0,
+            schema_after=user_version(backend.connection),
+            started_at=float(data.get("started_at") or time.time()),
+            outcome=str(data.get("outcome") or "ok"),
+            tests_run=data.get("tests_run"),
+            tests_passed=data.get("tests_passed"),
+            tests_skipped=data.get("tests_skipped"),
+            snapshot_path=data.get("snapshot_path"),
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        raise _fail(f"bad upgrade payload: {e}")
+    finally:
+        backend.close()
+    typer.echo(
+        f"recorded upgrade {record.id}: {record.from_tag or short(record.from_hash)} "
+        f"-> {record.to_tag}, schema {record.schema_before} -> {record.schema_after}"
+    )
+
+
+# ---------------------------------------------------------------- backup
+
+
+@backup_app.command("list")
+def backup_list(
+    root: RootOption = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Machine-readable output.")
+    ] = False,
+) -> None:
+    """List the snapshots of this root, newest first."""
+    where = _root(root)
+    backups = list_backups(where.path)
+    if as_json:
+        typer.echo(
+            json.dumps(
+                [
+                    {
+                        "path": str(b.path),
+                        "size": b.size,
+                        "tag": b.label,
+                        "created": b.created.isoformat() if b.created else None,
+                    }
+                    for b in backups
+                ],
+                indent=2,
+            )
+        )
+        return
+    if not backups:
+        typer.echo(f"(no snapshots in {backups_dir(where.path)})")
+        return
+    for backup in backups:
+        typer.echo(
+            f"  {backup.path.name:<44} {human_size(backup.size):>10}   from {backup.label}"
+        )
+    total = sum(b.size for b in backups)
+    typer.echo(
+        f"{len(backups)} snapshot(s), {human_size(total)} in {backups_dir(where.path)}"
+    )
+
+
+@backup_app.command("prune")
+def backup_prune(
+    root: RootOption = None,
+    keep: Annotated[
+        int, typer.Option("--keep", min=0, help="Snapshots to keep (the newest).")
+    ] = KEEP_DEFAULT,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show what would go; delete nothing.")
+    ] = False,
+    yes: Annotated[
+        bool, typer.Option("--yes", "-y", help="Delete without asking.")
+    ] = False,
+) -> None:
+    """Delete all but the newest --keep snapshots (the policy `tfs upgrade`
+    applies automatically)."""
+    where = _root(root)
+    busy = _upgrade_in_progress(Lock(where).holder())
+    if busy is not None:
+        raise _fail(f"{busy}; it may still need these snapshots")
+    doomed = prune_backups(where.path, keep, dry_run=True)
+    if not doomed:
+        typer.echo(f"nothing to prune (keeping the newest {keep})")
+        return
+    total = sum(b.size for b in doomed)
+    typer.echo(
+        f"{'would delete' if dry_run else 'deleting'} {len(doomed)} snapshot(s), {human_size(total)}:"
+    )
+    for backup in doomed:
+        typer.echo(f"  {backup.path}")
+    if dry_run:
+        return
+    if not yes and not typer.confirm("delete them?", default=False):
+        typer.echo("kept")
+        return
+    removed = prune_backups(where.path, keep)
+    typer.echo(f"deleted {len(removed)} snapshot(s)")
+
+
+# ------------------------------------------------------------------ main
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(describe())
+        raise typer.Exit()
+
+
 # The `--root` global option lives on the callback so `python -m ... --root X start` works.
 @app.callback()
 def main(
     ctx: typer.Context,
     root: RootOption = None,
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Print the version and commit (0.2.0 (abc1234)), then exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
 ) -> None:
     ctx.obj = {"root": root}
     if root is not None and ctx.invoked_subcommand not in (None, "init"):
         # A global --root applies to every command that did not get its own.
-        ctx.default_map = {ctx.invoked_subcommand: {"root": root}}
+        if ctx.invoked_subcommand == "backup":
+            ctx.default_map = {
+                "backup": {"list": {"root": root}, "prune": {"root": root}}
+            }
+        else:
+            ctx.default_map = {ctx.invoked_subcommand: {"root": root}}
 
 
 if __name__ == "__main__":  # pragma: no cover - `python -m tag_file_system.cli`

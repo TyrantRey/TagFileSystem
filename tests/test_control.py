@@ -21,6 +21,7 @@ from tag_file_system.services.control import (
     ControlUnavailable,
 )
 from tag_file_system.services.daemon import Daemon
+from tag_file_system.version import COMMIT, VERSION
 
 ADDON = """
     from tag_file_system import action
@@ -76,6 +77,7 @@ def client(root: Root, daemon: Daemon) -> ControlClient:
 def test_health_actions_and_files(root: Root, daemon: Daemon, client: ControlClient):
     health = client.health()
     assert health["status"] == "ok" and health["started"] is True
+    assert health["version"] == VERSION and health["hash"] == COMMIT
     assert health["addons"] == ["copy"] and health["in_flight"] == []
     assert Path(health["root"]) == root.path
 
