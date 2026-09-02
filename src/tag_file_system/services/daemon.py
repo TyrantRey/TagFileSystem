@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""The daemon: one watcher per root (DESIGN.md §5, §6.3, §8).
+"""The daemon: one watcher per root (DESIGN/v0-1-0.md §5, §6.3, §8).
 
 ``startup()`` takes the lock, closes runs a crash left open, loads the
 add-ons, replays undelivered problems and reconciles the data tree;

@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""The public add-on API (DESIGN.md §4.2):
+"""The public add-on API (DESIGN/v0-1-0.md §4.2):
 
     from tag_file_system import action
 
@@ -143,7 +143,7 @@ def info(_bare: object = None) -> Callable[[F], F]:
 @dataclass(frozen=True)
 class PathArg:
     """Annotation metadata: the argument names a location, not a literal path
-    (DESIGN.md §4.4). The binder resolves it before the handler runs."""
+    (DESIGN/v0-1-0.md §4.4). The binder resolves it before the handler runs."""
 
     kind: Literal["tagdir", "remote"]
 

@@ -12,7 +12,7 @@ class FileMetadata(BaseModel):
     file_format: str | None
     file_type: str | None
     mime_type: str | None = None
-    mtime_ns: int | None = None  # st_mtime_ns at the last hash (DESIGN.md §5)
+    mtime_ns: int | None = None  # st_mtime_ns at the last hash (DESIGN/v0-1-0.md §5)
 
 
 class Tag(BaseModel):

@@ -1,7 +1,7 @@
 # Code by AkinoAlice@TyrantRey
 
 """The runner: turns file events into runs of add-on handlers and owns the
-run lifecycle (DESIGN.md §4.3, §4.5, §6).
+run lifecycle (DESIGN/v0-1-0.md §4.3, §4.5, §6).
 
 Entry points the engine calls: ``on_file(hook, ...)`` for a file under one
 or more ``@@`` directories, ``on_tag(...)`` when a file acquires a tag,

@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Persistence of the action layer (DESIGN.md §6–§7): ``actions``,
+"""Persistence of the action layer (DESIGN/v0-1-0.md §6–§7): ``actions``,
 ``action_runs``, ``action_trace``, ``provenance`` and ``problems``.
 
 ``ActionStore`` shares the ``SQLiteBackend``'s connection and lock, so a
@@ -47,7 +47,7 @@ from tag_file_system.database.sqlite import (
 
 
 class RunExists(ValueError):
-    """A run with this key already exists (DESIGN.md §6.1); retry instead."""
+    """A run with this key already exists (DESIGN/v0-1-0.md §6.1); retry instead."""
 
     def __init__(self, existing: RunRecord) -> None:
         super().__init__(

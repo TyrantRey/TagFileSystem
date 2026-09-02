@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Discovery and (re)loading of add-ons in ``script/`` (DESIGN.md §4.1).
+"""Discovery and (re)loading of add-ons in ``script/`` (DESIGN/v0-1-0.md §4.1).
 
 ``script/<name>.py`` binds the function slug ``name``. Every top-level
 ``*.py`` is imported eagerly; a file starting with ``_`` is a helper module

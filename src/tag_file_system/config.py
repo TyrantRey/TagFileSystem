@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""``Config``: the ``.tfs/config.toml`` model of DESIGN.md §2."""
+"""``Config``: the ``.tfs/config.toml`` model of DESIGN/v0-1-0.md §2."""
 
 import ipaddress
 import tomllib
@@ -138,7 +138,7 @@ class Config(BaseModel):
         a small writer keeps the file human-friendly (comments) without a new
         dependency."""
         lines = [
-            "# TagFileSystem root configuration (see DESIGN.md §2).",
+            "# TagFileSystem root configuration (see DESIGN/v0-1-0.md §2).",
             "# Paths are relative to the root unless noted.",
             "",
             "[logging]",

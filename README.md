@@ -14,8 +14,8 @@ photos/
 ```
 
 Everything that happens — tags, runs, what a run produced, what went wrong —
-is queryable, by you or by a tool. [`DESIGN.md`](DESIGN.md) is the approved
-design; this README is the short version.
+is queryable, by you or by a tool. [`DESIGN/`](DESIGN) holds the approved
+designs, one per release; this README is the short version.
 
 ## Requirements
 
@@ -150,3 +150,8 @@ file starts with `# Code by AkinoAlice@TyrantRey`.
 A typo is a small change, so it is a C: `+0.0.1`. Bumping A resets B and C to
 `0`; bumping B resets C. Bump the version in the same commit as the change it
 describes.
+
+Design documents carry the same numbers: `DESIGN/v{A}-{B}-{C}.md` is the
+approved design for that release — [`v0-1-0.md`](DESIGN/v0-1-0.md) is what
+0.1.0 shipped, [`v0-2-0.md`](DESIGN/v0-2-0.md) is self-update, approved and not
+yet implemented.

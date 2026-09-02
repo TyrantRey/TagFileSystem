@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""The managed root (DESIGN.md §2): discovery, ``init``, zones, lock, token.
+"""The managed root (DESIGN/v0-1-0.md §2): discovery, ``init``, zones, lock, token.
 
 <root>/
   .tfs/config.toml   .tfs/db/   .tfs/lock   .tfs/token

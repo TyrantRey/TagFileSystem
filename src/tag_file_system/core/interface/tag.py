@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Models produced by the name grammar (DESIGN.md §3).
+"""Models produced by the name grammar (DESIGN/v0-1-0.md §3).
 
 segment := label? marker*
 marker  := '@@' func ('__' arg)*     -> ActionCall

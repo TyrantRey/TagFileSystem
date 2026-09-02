@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Schema versioning (DESIGN.md §7, "Migrations").
+"""Schema versioning (DESIGN/v0-1-0.md §7, "Migrations").
 
 ``PRAGMA user_version`` holds the schema version. ``apply_migrations`` runs
 every migration above the stored version, each in its own transaction, and

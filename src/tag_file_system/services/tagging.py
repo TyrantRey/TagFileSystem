@@ -51,7 +51,7 @@ def split_extension(filename: str) -> str:
 
 
 class TaggingParser:
-    """Parse the name grammar of DESIGN.md §3.
+    """Parse the name grammar of DESIGN/v0-1-0.md §3.
 
     ``parse`` handles one segment (a directory name or a filename stem);
     ``parse_path`` walks every segment of a root-relative path and merges the
