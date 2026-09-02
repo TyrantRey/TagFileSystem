@@ -52,7 +52,9 @@ app = typer.Typer(
 
 RootOption = Annotated[
     Path | None,
-    typer.Option("--root", "-r", help="The managed root (default: discovered from CWD)."),
+    typer.Option(
+        "--root", "-r", help="The managed root (default: discovered from CWD)."
+    ),
 ]
 
 STOP_GRACE_SECONDS = 5.0  # on top of the daemon's own stop_timeout_seconds
@@ -98,7 +100,9 @@ def _client(
     except RootError as e:
         raise ControlUnavailable(_one_line(e))
     if holder is not None and holder.port:
-        return ControlClient(holder.bind or "127.0.0.1", holder.port, token, timeout=timeout)
+        return ControlClient(
+            holder.bind or "127.0.0.1", holder.port, token, timeout=timeout
+        )
     try:
         config = root.load_config()
     except ConfigError as e:
@@ -154,7 +158,15 @@ def is_network_path(path: Path) -> bool:
         if text == mount or text.startswith(mount.rstrip("/") + "/"):
             if best is None or len(mount) > best[0]:
                 best = (len(mount), fstype)
-    return best is not None and best[1] in {"nfs", "nfs4", "cifs", "smb3", "smbfs", "afpfs", "fuse.sshfs"}
+    return best is not None and best[1] in {
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smb3",
+        "smbfs",
+        "afpfs",
+        "fuse.sshfs",
+    }
 
 
 def _open_backend(root: Root):
@@ -203,7 +215,9 @@ def validate_tags(tags: list[str] | None) -> list[str] | None:
 
 @app.command()
 def init(
-    directory: Annotated[Path, typer.Argument(help="Folder to turn into a root.")] = Path("."),
+    directory: Annotated[
+        Path, typer.Argument(help="Folder to turn into a root.")
+    ] = Path("."),
 ) -> None:
     """Turn a folder into a managed root (creates .tfs/ and script/)."""
     try:
@@ -226,7 +240,9 @@ def init(
 @app.command("list")
 def list_addons(
     root: RootOption = None,
-    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Machine-readable output.")
+    ] = False,
 ) -> None:
     """List the loaded add-ons with their hooks, arguments and load problems."""
     where = _root(root)
@@ -262,13 +278,20 @@ def list_addons(
         source = f"script/ (no daemon running: {reason})"
 
     if as_json:
-        typer.echo(json.dumps({"source": source, "actions": actions, "problems": problems}, indent=2))
+        typer.echo(
+            json.dumps(
+                {"source": source, "actions": actions, "problems": problems}, indent=2
+            )
+        )
         return
     typer.echo(f"add-ons from {source}:")
     if not actions:
         typer.echo("  (none)")
     for action in actions:
-        hooks = ", ".join([*action["hooks"], *(f"on {p}" for p in action["problem_hooks"])]) or "-"
+        hooks = (
+            ", ".join([*action["hooks"], *(f"on {p}" for p in action["problem_hooks"])])
+            or "-"
+        )
         typer.echo(f"  {action['name']:<20} {hooks}")
         signature = action.get("signature") or {}
         if not isinstance(signature, dict):
@@ -291,14 +314,36 @@ def list_addons(
 @app.command()
 def query(
     root: RootOption = None,
-    tag: Annotated[list[str] | None, typer.Option("--tag", "-t", help="Required tag (repeatable, ANDed).")] = None,
-    name: Annotated[str | None, typer.Option("--name", help="Filename substring (case-insensitive).")] = None,
-    file_format: Annotated[str | None, typer.Option("--format", help="Extension with its dot, e.g. .jpg")] = None,
-    mime: Annotated[str | None, typer.Option("--mime", help="MIME type, exact (image/jpeg) or a family (image/*).")] = None,
-    prefix: Annotated[str | None, typer.Option("--under", help="Root-relative directory, e.g. @@make_copy")] = None,
-    deleted: Annotated[bool, typer.Option("--deleted", help="Include soft-deleted rows.")] = False,
-    runs: Annotated[bool, typer.Option("--runs", help="Include each file's run history.")] = False,
-    as_json: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
+    tag: Annotated[
+        list[str] | None,
+        typer.Option("--tag", "-t", help="Required tag (repeatable, ANDed)."),
+    ] = None,
+    name: Annotated[
+        str | None,
+        typer.Option("--name", help="Filename substring (case-insensitive)."),
+    ] = None,
+    file_format: Annotated[
+        str | None, typer.Option("--format", help="Extension with its dot, e.g. .jpg")
+    ] = None,
+    mime: Annotated[
+        str | None,
+        typer.Option(
+            "--mime", help="MIME type, exact (image/jpeg) or a family (image/*)."
+        ),
+    ] = None,
+    prefix: Annotated[
+        str | None,
+        typer.Option("--under", help="Root-relative directory, e.g. @@make_copy"),
+    ] = None,
+    deleted: Annotated[
+        bool, typer.Option("--deleted", help="Include soft-deleted rows.")
+    ] = False,
+    runs: Annotated[
+        bool, typer.Option("--runs", help="Include each file's run history.")
+    ] = False,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Machine-readable output.")
+    ] = False,
 ) -> None:
     """Find files by tag and attributes."""
     where = _root(root)
@@ -310,7 +355,13 @@ def query(
     holder = Lock(where).holder()
     try:
         files = _client(where, holder).files(
-            tags=tags, name=name, format=file_format, mime=mime, deleted=deleted, prefix=under, runs=runs
+            tags=tags,
+            name=name,
+            format=file_format,
+            mime=mime,
+            deleted=deleted,
+            prefix=under,
+            runs=runs,
         )
     except ControlError as e:
         if _unreachable(e, holder) is None:
@@ -326,7 +377,8 @@ def query(
                 path_prefix=under,
             )
             files = [
-                file_payload(f, store.query_runs(file_path=f.path) if runs else None) for f in rows
+                file_payload(f, store.query_runs(file_path=f.path) if runs else None)
+                for f in rows
             ]
         finally:
             backend.close()
@@ -363,9 +415,13 @@ def reload(root: RootOption = None) -> None:
         if reason is None:
             raise _fail(str(e))
         if holder is not None and holder.is_live_local():
-            raise _fail(f"cannot reach the daemon holding this root (pid {holder.pid}): {reason}")
+            raise _fail(
+                f"cannot reach the daemon holding this root (pid {holder.pid}): {reason}"
+            )
         raise _fail(f"{reason}; is the daemon running? (`tfs start`)")
-    typer.echo(f"config {result['config']}; add-ons: {', '.join(result['addons']) or '(none)'}")
+    typer.echo(
+        f"config {result['config']}; add-ons: {', '.join(result['addons']) or '(none)'}"
+    )
 
 
 # ----------------------------------------------------------------- start
@@ -374,10 +430,15 @@ def reload(root: RootOption = None) -> None:
 @app.command()
 def start(
     root: RootOption = None,
-    detach: Annotated[bool, typer.Option("--detach", "-d", help="Run in the background.")] = False,
+    detach: Annotated[
+        bool, typer.Option("--detach", "-d", help="Run in the background.")
+    ] = False,
     force: Annotated[
         bool,
-        typer.Option("--force", help="Take over a lock that looks live (a lock left by a dead daemon is taken over anyway)."),
+        typer.Option(
+            "--force",
+            help="Take over a lock that looks live (a lock left by a dead daemon is taken over anyway).",
+        ),
     ] = False,
 ) -> None:
     """Reconcile the root and watch it (foreground unless -d)."""
@@ -386,13 +447,17 @@ def start(
     try:
         where.read_token()
     except RootError as e:
-        raise _fail(f"{e}; the root is damaged, re-run `tfs init` on a fresh folder or restore .tfs/token")
+        raise _fail(
+            f"{e}; the root is damaged, re-run `tfs init` on a fresh folder or restore .tfs/token"
+        )
 
     if detach:
         _start_detached(where, config, force)
         return
 
-    configure_logging(config.logging.level, where.path / config.logging.file, stream=False)
+    configure_logging(
+        config.logging.level, where.path / config.logging.file, stream=False
+    )
     from tag_file_system.services.daemon import Daemon
 
     daemon = Daemon(where, config=config, control=True, apply_logging=True)
@@ -400,14 +465,18 @@ def start(
         daemon.startup(force=force)
     except LockHeld as e:
         if e.info.is_live_local():
-            raise _fail(f"{e}; that process is running on this machine — `tfs stop` it first")
+            raise _fail(
+                f"{e}; that process is running on this machine — `tfs stop` it first"
+            )
         raise _fail(f"{e}; use --force if that daemon is gone")
     except (RootError, ConfigError) as e:
         daemon.shutdown()
         raise _fail(str(e))
     except OSError as e:
         daemon.shutdown()
-        raise _fail(f"cannot open the control channel on {config.daemon.bind}:{config.daemon.port}: {e}")
+        raise _fail(
+            f"cannot open the control channel on {config.daemon.bind}:{config.daemon.port}: {e}"
+        )
     typer.echo(
         f"watching {where.path} (control on http://{config.daemon.bind}:{config.daemon.port}); Ctrl+C to stop"
     )
@@ -417,7 +486,9 @@ def start(
 
 def _start_detached(where: Root, config: Config, force: bool) -> None:
     log = where.tfs_dir / "daemon.out"
-    client = ControlClient(config.daemon.bind, config.daemon.port, where.read_token(), timeout=1.0)
+    client = ControlClient(
+        config.daemon.bind, config.daemon.port, where.read_token(), timeout=1.0
+    )
     try:
         running = client.health()
     except ControlError:
@@ -427,7 +498,14 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
             f"a daemon already answers on {config.daemon.bind}:{config.daemon.port} "
             f"(pid {running.get('pid')}); use `tfs stop` first"
         )
-    args = [sys.executable, "-m", "tag_file_system.cli", "--root", str(where.path), "start"]
+    args = [
+        sys.executable,
+        "-m",
+        "tag_file_system.cli",
+        "--root",
+        str(where.path),
+        "start",
+    ]
     if force:
         args.append("--force")
     kwargs: dict[str, Any] = {}
@@ -442,7 +520,11 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
         kwargs["start_new_session"] = True
     with log.open("ab") as out:
         process = subprocess.Popen(
-            args, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kwargs
+            args,
+            stdout=out,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            **kwargs,
         )
 
     # The child may re-exec and may die at once (lock, port): report what
@@ -461,8 +543,14 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
             continue
         pid = health.get("pid")
         if pid is not None and pid != previous_pid:
-            state = "watching" if health.get("started") else "starting: reconciling the root"
-            typer.echo(f"daemon started in the background (pid {pid}, {state}); output in {log}")
+            state = (
+                "watching"
+                if health.get("started")
+                else "starting: reconciling the root"
+            )
+            typer.echo(
+                f"daemon started in the background (pid {pid}, {state}); output in {log}"
+            )
             return
         time.sleep(0.25)
 
@@ -478,7 +566,9 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
     holder = Lock(where).holder()
     if holder is not None and holder.pid != previous_pid and holder.is_live_local():
         _signal_stop(holder.pid)
-    raise _fail(f"the daemon did not come up within 15s (pid {process.pid}); output so far:\n{tail}")
+    raise _fail(
+        f"the daemon did not come up within 15s (pid {process.pid}); output so far:\n{tail}"
+    )
 
 
 def _kill_silently(process: subprocess.Popen) -> None:
@@ -497,7 +587,10 @@ def stop(
     root: RootOption = None,
     timeout: Annotated[
         float | None,
-        typer.Option("--timeout", help="Seconds to wait for the daemon to exit (default: its stop_timeout_seconds + 5)."),
+        typer.Option(
+            "--timeout",
+            help="Seconds to wait for the daemon to exit (default: its stop_timeout_seconds + 5).",
+        ),
     ] = None,
 ) -> None:
     """Stop the running daemon gracefully."""
@@ -506,7 +599,9 @@ def stop(
     holder = lock.holder()
     if timeout is None:
         try:
-            timeout = where.load_config().daemon.stop_timeout_seconds + STOP_GRACE_SECONDS
+            timeout = (
+                where.load_config().daemon.stop_timeout_seconds + STOP_GRACE_SECONDS
+            )
         except ConfigError:
             timeout = 30.0 + STOP_GRACE_SECONDS
     forced = False
@@ -528,7 +623,9 @@ def stop(
                 f"the daemon runs on {holder.hostname} (pid {holder.pid}) and its control channel "
                 f"does not answer ({e.message}); stop it on that machine"
             )
-        typer.echo(f"control channel unresponsive ({e.message}); signalling pid {holder.pid}")
+        typer.echo(
+            f"control channel unresponsive ({e.message}); signalling pid {holder.pid}"
+        )
         sent = _signal_stop(holder.pid)
         if sent is None:
             raise _fail(f"could not stop pid {holder.pid}")
@@ -568,7 +665,9 @@ def _signal_stop(pid: int) -> bool | None:
     if os.name == "nt":
         # A detached console-less daemon cannot receive CTRL_BREAK; taskkill
         # without /F is ignored by console applications. Kill it.
-        result = subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+        result = subprocess.run(
+            ["taskkill", "/PID", str(pid), "/F"], capture_output=True
+        )
         return False if result.returncode == 0 else None
     import signal
 

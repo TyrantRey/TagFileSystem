@@ -2,7 +2,7 @@
 
 """The package logger and its one-time configuration.
 
-Importing this module configures nothing: ``configure_logging`` is called
+importing this module configures nothing: ``configure_logging`` is called
 by whatever runs the program (the daemon, ``main.py``), never at import.
 """
 

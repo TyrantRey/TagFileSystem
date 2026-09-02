@@ -36,7 +36,15 @@ from tag_file_system.core.interface.tag import ParsedPath
 from tag_file_system.core.logger import logger
 from tag_file_system.database.action_store import ActionStore
 from tag_file_system.database.sqlite import SQLiteBackend
-from tag_file_system.root import SCRIPT_DIR, TFS_DIR, Lock, LockInfo, OutsideRoot, Root, Zone
+from tag_file_system.root import (
+    SCRIPT_DIR,
+    TFS_DIR,
+    Lock,
+    LockInfo,
+    OutsideRoot,
+    Root,
+    Zone,
+)
 from tag_file_system.services.control import ControlServer
 from tag_file_system.services.file_info import compute_file_hash
 from tag_file_system.services.indexer import Indexed, Indexer
@@ -81,7 +89,9 @@ def _exists_exactly(path: Path, case_insensitive: bool) -> bool:
 class ReconcileReport:
     indexed: list[Indexed] = field(default_factory=list)
     removed: list[TaggedFile] = field(default_factory=list)
-    moved: list[TaggedFile] = field(default_factory=list)  # vanished rows matched by hash
+    moved: list[TaggedFile] = field(
+        default_factory=list
+    )  # vanished rows matched by hash
     unreadable: list[str] = field(default_factory=list)
 
     @property
@@ -126,12 +136,20 @@ class Daemon:
     # ------------------------------------------------------- load problems
 
     def _report_load_problem(
-        self, severity: Severity, kind: str, message: str, /, *, action_name: str | None = None
+        self,
+        severity: Severity,
+        kind: str,
+        message: str,
+        /,
+        *,
+        action_name: str | None = None,
     ) -> object:
         """Loader problems go to the problem log like any other and are also
         kept per script file, so ``tfs list`` can show why a script is not
         what its author expects."""
-        first = message.split(" ", 1)[0].rstrip(":")  # loader messages lead with the file
+        first = message.split(" ", 1)[0].rstrip(
+            ":"
+        )  # loader messages lead with the file
         if first.endswith(".py"):
             script = first
         else:
@@ -334,7 +352,9 @@ class Daemon:
                 from tag_file_system.core.logger import configure_logging
 
                 configure_logging(
-                    self.config.logging.level, self.root.path / self.config.logging.file, stream=False
+                    self.config.logging.level,
+                    self.root.path / self.config.logging.file,
+                    stream=False,
                 )
         except ConfigError as e:
             config_ok = False
@@ -373,7 +393,10 @@ class Daemon:
         """One watcher batch: consolidate, route by zone, apply."""
         consolidated: dict[str, Change] = {}
         for change, raw in changes:
-            if raw not in consolidated or _PRIORITY[change] < _PRIORITY[consolidated[raw]]:
+            if (
+                raw not in consolidated
+                or _PRIORITY[change] < _PRIORITY[consolidated[raw]]
+            ):
                 consolidated[raw] = change
 
         script_events: list[tuple[Change, Path]] = []
@@ -386,9 +409,13 @@ class Daemon:
                 continue
             if zone is Zone.TFS:
                 continue
-            if change is Change.deleted and _exists_exactly(path, self.case_insensitive):
+            if change is Change.deleted and _exists_exactly(
+                path, self.case_insensitive
+            ):
                 change = Change.added  # an editor's atomic save: the disk decides
-            (script_events if zone is Zone.SCRIPT else data_events).append((change, path))
+            (script_events if zone is Zone.SCRIPT else data_events).append(
+                (change, path)
+            )
 
         for change, path in script_events:
             if change is Change.deleted:
@@ -399,7 +426,9 @@ class Daemon:
         if data_events:
             self._handle_data(data_events, source)
 
-    def _handle_data(self, events: list[tuple[Change, Path]], source: RunSource) -> None:
+    def _handle_data(
+        self, events: list[tuple[Change, Path]], source: RunSource
+    ) -> None:
         in_flight_before = self._in_flight()
         deleted = [p for c, p in events if c is Change.deleted]
         added = [p for c, p in events if c is Change.added]
@@ -458,7 +487,11 @@ class Daemon:
             if indexed is None:
                 continue
             hook = Hook.ADDED if indexed.previous is None else Hook.MODIFIED
-            if hook is Hook.MODIFIED and not indexed.content_changed and not indexed.new_tags:
+            if (
+                hook is Hook.MODIFIED
+                and not indexed.content_changed
+                and not indexed.new_tags
+            ):
                 continue  # touched, unchanged: nothing to do
             self._fire(indexed, hook, source)
             self._observe(indexed.file.path.as_posix(), in_flight_before)
@@ -544,9 +577,15 @@ class Daemon:
         before = {t.name for t in old.tags}
         for tag in indexed.file.tags:
             if tag.name not in before:
-                self.runner.on_tag(indexed.file.original_path, indexed.file, tag.name, source=source)
+                self.runner.on_tag(
+                    indexed.file.original_path, indexed.file, tag.name, source=source
+                )
         self.runner.on_file(
-            Hook.ADDED, indexed.file.original_path, indexed.file, indexed.parsed, source=source
+            Hook.ADDED,
+            indexed.file.original_path,
+            indexed.file,
+            indexed.parsed,
+            source=source,
         )
 
     def _removed(self, row: TaggedFile, moved: bool, source: RunSource) -> None:
@@ -576,7 +615,9 @@ class Daemon:
             return
         ambiguous = len(handles) > 1
         for handle in handles:
-            self.store.add_provenance(key, handle.id, ProvenanceKind.OBSERVED, ambiguous=ambiguous)
+            self.store.add_provenance(
+                key, handle.id, ProvenanceKind.OBSERVED, ambiguous=ambiguous
+            )
         self.runner.problem(
             Severity.WARN,
             "observed",
@@ -601,11 +642,15 @@ class Daemon:
         report = ReconcileReport()
         try:
             if subtree is not None and self.root.zone(base) is not Zone.DATA:
-                self.logger.warning(f"reconcile skipped: {base} is not a data directory")
+                self.logger.warning(
+                    f"reconcile skipped: {base} is not a data directory"
+                )
                 return report
             prefix = self.root.relative(base).as_posix()
         except OutsideRoot:
-            self.logger.warning(f"reconcile skipped: {base} is outside {self.root.path}")
+            self.logger.warning(
+                f"reconcile skipped: {base} is outside {self.root.path}"
+            )
             return report
         if in_flight is None:
             in_flight = self._in_flight()
@@ -614,7 +659,8 @@ class Daemon:
         for current, dirs, files in os.walk(base):
             here = Path(current)
             dirs[:] = sorted(
-                d for d in dirs
+                d
+                for d in dirs
                 if not (here == self.root.path and d == SCRIPT_DIR)
                 and os.path.normcase(d) != os.path.normcase(TFS_DIR)
             )
@@ -627,22 +673,33 @@ class Daemon:
                     continue
                 seen.add(indexed.file.path.as_posix())
                 report.indexed.append(indexed)
-                hook = Hook.MODIFIED if indexed.previous is not None and indexed.content_changed else Hook.ADDED
+                hook = (
+                    Hook.MODIFIED
+                    if indexed.previous is not None and indexed.content_changed
+                    else Hook.ADDED
+                )
                 self._fire(indexed, hook, source)
                 if indexed.previous is None or indexed.content_changed:
                     self._observe(indexed.file.path.as_posix(), in_flight)
 
-        rows = self.backend.query_files(path_prefix=prefix) if prefix != "." else self.backend.query_files()
+        rows = (
+            self.backend.query_files(path_prefix=prefix)
+            if prefix != "."
+            else self.backend.query_files()
+        )
         fresh_hashes = {i.file.file_hash for i in report.indexed if i.previous is None}
         for row in rows:
             key = row.path.as_posix()
             if key in seen or key in report.unreadable:
                 continue
             if row.path.parts and os.path.normcase(row.path.parts[0]) in (
-                os.path.normcase(TFS_DIR), os.path.normcase(SCRIPT_DIR)
+                os.path.normcase(TFS_DIR),
+                os.path.normcase(SCRIPT_DIR),
             ):
                 continue
-            if any(os.path.normcase(p) == os.path.normcase(TFS_DIR) for p in row.path.parts):
+            if any(
+                os.path.normcase(p) == os.path.normcase(TFS_DIR) for p in row.path.parts
+            ):
                 continue
             self.backend.delete(row.path)
             moved = row.file_hash in fresh_hashes

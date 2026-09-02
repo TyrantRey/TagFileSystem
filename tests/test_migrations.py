@@ -292,7 +292,9 @@ def test_duplicate_key_after_relativizing_is_reported(tmp_path: Path):
     assert backend.migration_report is not None
     assert backend.migration_report.conflicts == [str(root / "a.txt")]
     assert fetch(backend, "a.txt").file_id == "f1"
-    row = backend.connection.execute("SELECT status FROM files WHERE id = 'f2'").fetchone()
+    row = backend.connection.execute(
+        "SELECT status FROM files WHERE id = 'f2'"
+    ).fetchone()
     assert row["status"] == "deleted"
     backend.close()
 
@@ -442,7 +444,9 @@ def test_connection_is_shared_safely_between_threads(backend: SQLiteBackend):
         try:
             for i in range(20):
                 name = f"t{index}-{i}.txt"
-                backend.insert(filename=name, file_path=name, file_hash="h", file_size=1)
+                backend.insert(
+                    filename=name, file_path=name, file_hash="h", file_size=1
+                )
                 backend.set_file_tags(name, [f"tag{index}"])
                 backend.query_files(tags=[f"tag{index}"])
         except Exception as e:  # pragma: no cover - reported via assert

@@ -63,7 +63,9 @@ class Runtime(Protocol):
 
     def deleted(self, handle: RunHandle, path: Path) -> None: ...
 
-    def tag(self, handle: RunHandle, path: Path, names: list[str], add: bool) -> None: ...
+    def tag(
+        self, handle: RunHandle, path: Path, names: list[str], add: bool
+    ) -> None: ...
 
     def problem(
         self,
@@ -80,7 +82,9 @@ class Runtime(Protocol):
 
     def resolve(self, kind: str, raw: str) -> Path: ...
 
-    def spawn(self, handle: RunHandle, fn: Callable, args: tuple, kwargs: dict) -> threading.Thread: ...
+    def spawn(
+        self, handle: RunHandle, fn: Callable, args: tuple, kwargs: dict
+    ) -> threading.Thread: ...
 
     def done(self, handle: RunHandle) -> None: ...
 
@@ -113,9 +117,13 @@ class ProblemContext:
     def resolve(self, kind: str, raw: str) -> Path:
         return self._runtime.resolve(kind, raw)
 
-    def problem(self, severity: Severity | str, message: str, kind: str = "addon.problem") -> None:
+    def problem(
+        self, severity: Severity | str, message: str, kind: str = "addon.problem"
+    ) -> None:
         self.logger.log(
-            logging.ERROR if Severity(severity).rank <= Severity.ERR.rank else logging.WARNING,
+            logging.ERROR
+            if Severity(severity).rank <= Severity.ERR.rank
+            else logging.WARNING,
             f"[{severity}] {kind}: {message} (raised inside a problem handler; not dispatched)",
         )
 
@@ -185,7 +193,10 @@ class ActionContext:
         self._runtime.trace(
             self._handle,
             TraceKind.FS_COPY,
-            {"src": self._key(source) or str(source), "dst": self._key(target) or str(target)},
+            {
+                "src": self._key(source) or str(source),
+                "dst": self._key(target) or str(target),
+            },
         )
         self.emit(target)
         return target
@@ -199,12 +210,17 @@ class ActionContext:
         self._runtime.trace(
             self._handle,
             TraceKind.FS_MOVE,
-            {"src": self._key(source) or str(source), "dst": self._key(moved) or str(moved)},
+            {
+                "src": self._key(source) or str(source),
+                "dst": self._key(moved) or str(moved),
+            },
         )
         self._runtime.moved(self._handle, source, moved)
         return moved
 
-    def write(self, dst: Path | str, data: bytes | str, encoding: str = "utf-8") -> Path:
+    def write(
+        self, dst: Path | str, data: bytes | str, encoding: str = "utf-8"
+    ) -> Path:
         target = self._abs(dst)
         target.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(data, str):
@@ -223,7 +239,9 @@ class ActionContext:
         target = self._abs(path)
         target.unlink()
         self._runtime.trace(
-            self._handle, TraceKind.FS_DELETE, {"path": self._key(target) or str(target)}
+            self._handle,
+            TraceKind.FS_DELETE,
+            {"path": self._key(target) or str(target)},
         )
         self._runtime.deleted(self._handle, target)
 

@@ -45,7 +45,11 @@ def test_init_creates_the_layout(root: Root):
     assert root.token_path.is_file()
     assert not root.lock_path.exists()
     assert root.db_path == root.tfs_dir / "db" / "system.db"
-    assert sorted(p.name for p in root.tfs_dir.iterdir()) == ["config.toml", "db", "token"]
+    assert sorted(p.name for p in root.tfs_dir.iterdir()) == [
+        "config.toml",
+        "db",
+        "token",
+    ]
 
     assert root.load_config() == Config()
     assert len(root.read_token()) >= 32

@@ -79,9 +79,9 @@ def test_load_all_discovers_handlers(root: Root, loader: AddonLoader, problems):
     assert addon is not None
     assert addon.key.as_posix() == "script/make_copy.py"
     assert len(addon.script_hash) == 64
-    assert addon.hooks == [Hook.TAGGED, Hook.REMOVED, Hook.ADDED] or set(addon.hooks) == {
-        Hook.ADDED, Hook.REMOVED, Hook.TAGGED
-    }
+    assert addon.hooks == [Hook.TAGGED, Hook.REMOVED, Hook.ADDED] or set(
+        addon.hooks
+    ) == {Hook.ADDED, Hook.REMOVED, Hook.TAGGED}
     assert [h.name for h in loader.handlers_for("make_copy", Hook.ADDED)] == ["run"]
     assert loader.handlers_for("make_copy", Hook.REMOVED)[0].spec.on_move is True
     assert loader.handlers_for("make_copy", Hook.MODIFIED) == []
@@ -89,13 +89,17 @@ def test_load_all_discovers_handlers(root: Root, loader: AddonLoader, problems):
     assert [h.name for h in loader.tag_handlers("photos")] == ["on_photo"]
     assert loader.tag_handlers("other") == []
     assert [h.name for h in loader.problem_handlers(Severity.CRIT)] == ["notify"]
-    assert loader.problem_handlers(Severity.WARN) == []  # err handler does not cover warn
+    assert (
+        loader.problem_handlers(Severity.WARN) == []
+    )  # err handler does not cover warn
     assert addon.signature["added"]["properties"]["dst"]["x-tfs-path"] == "remote"
     assert addon.signature["added"]["properties"]["suffix"]["default"] == ".jpg"
     assert problems == []
 
 
-def test_helpers_and_bad_names_are_not_addons(root: Root, loader: AddonLoader, problems):
+def test_helpers_and_bad_names_are_not_addons(
+    root: Root, loader: AddonLoader, problems
+):
     write(root, "_helper.py", HELPER)
     write(root, "Make_Copy.py", MAKE_COPY)
     write(root, "1st.py", "x = 1\n")
@@ -110,10 +114,16 @@ def test_helpers_and_bad_names_are_not_addons(root: Root, loader: AddonLoader, p
     assert all(p[0] is Severity.WARN for p in problems)
 
 
-def test_import_errors_isolate_the_broken_addon(root: Root, loader: AddonLoader, problems):
+def test_import_errors_isolate_the_broken_addon(
+    root: Root, loader: AddonLoader, problems
+):
     write(root, "broken.py", "def run(:\n")
     write(root, "raises.py", "raise RuntimeError('at import')\n")
-    write(root, "ok.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n")
+    write(
+        root,
+        "ok.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n",
+    )
 
     loaded = loader.load_all()
 
@@ -125,7 +135,9 @@ def test_import_errors_isolate_the_broken_addon(root: Root, loader: AddonLoader,
     assert MODULE_PREFIX + "broken" not in sys.modules
 
 
-def test_bad_handler_signatures_are_reported_and_skipped(root: Root, loader: AddonLoader, problems):
+def test_bad_handler_signatures_are_reported_and_skipped(
+    root: Root, loader: AddonLoader, problems
+):
     write(
         root,
         "sig.py",
@@ -203,7 +215,9 @@ def test_second_handler_for_the_same_hook_is_reported_and_skipped(
     assert all(p[0] is Severity.ERR for p in problems)
 
 
-def test_reload_replaces_handlers_and_keeps_old_on_failure(root: Root, loader: AddonLoader, problems):
+def test_reload_replaces_handlers_and_keeps_old_on_failure(
+    root: Root, loader: AddonLoader, problems
+):
     write(root, "_helper.py", HELPER)
     path = write(root, "make_copy.py", MAKE_COPY)
     first = loader.load(path)
@@ -222,12 +236,18 @@ def test_reload_replaces_handlers_and_keeps_old_on_failure(root: Root, loader: A
     write(root, "make_copy.py", "def run(:\n")
     assert loader.load(path) is None
     assert loader.addon_for("make_copy") is second  # previous version kept
-    assert loader.handlers_for("make_copy", Hook.ADDED)[0].func(None, None, None) == "v2"
+    assert (
+        loader.handlers_for("make_copy", Hook.ADDED)[0].func(None, None, None) == "v2"
+    )
     assert problems[-1][1] == "addon.import"
 
 
 def test_unload(root: Root, loader: AddonLoader):
-    path = write(root, "ok.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n")
+    path = write(
+        root,
+        "ok.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n",
+    )
     loader.load(path)
     assert MODULE_PREFIX + "ok" in sys.modules
 
@@ -240,7 +260,9 @@ def test_unload(root: Root, loader: AddonLoader):
     assert loader.unload(path) is None
 
 
-def test_future_annotations_dataclasses_and_sys_exit(root: Root, loader: AddonLoader, problems):
+def test_future_annotations_dataclasses_and_sys_exit(
+    root: Root, loader: AddonLoader, problems
+):
     write(
         root,
         "modern.py",
@@ -259,7 +281,11 @@ def test_future_annotations_dataclasses_and_sys_exit(root: Root, loader: AddonLo
         """,
     )
     write(root, "quitter.py", "import sys\nsys.exit(0)\n")
-    write(root, "ok.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n")
+    write(
+        root,
+        "ok.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n",
+    )
 
     loaded = loader.load_all()
 
@@ -272,9 +298,15 @@ def test_future_annotations_dataclasses_and_sys_exit(root: Root, loader: AddonLo
     assert module.__spec__ is not None and module.__package__ == "tfs_addons"
 
 
-def test_helper_imports_leave_no_pycache_and_hot_reload(root: Root, loader: AddonLoader):
+def test_helper_imports_leave_no_pycache_and_hot_reload(
+    root: Root, loader: AddonLoader
+):
     write(root, "_helper.py", "X = 'A'\n")
-    path = write(root, "use.py", "from tag_file_system import action\nfrom _helper import X\n@action.added()\ndef run(p, m, c):\n    return X\n")
+    path = write(
+        root,
+        "use.py",
+        "from tag_file_system import action\nfrom _helper import X\n@action.added()\ndef run(p, m, c):\n    return X\n",
+    )
     loader.load(path)
 
     assert not (root.script_dir / "__pycache__").exists()
@@ -290,7 +322,11 @@ def test_helpers_are_per_root(tmp_path: Path):
     roots = [Root.init(tmp_path / name) for name in ("one", "two")]
     for root, value in zip(roots, ("ONE", "TWO")):
         write(root, "_helper.py", f"X = '{value}'\n")
-        write(root, "use.py", "from tag_file_system import action\nfrom _helper import X\n@action.added()\ndef run(p, m, c):\n    return X\n")
+        write(
+            root,
+            "use.py",
+            "from tag_file_system import action\nfrom _helper import X\n@action.added()\ndef run(p, m, c):\n    return X\n",
+        )
     loaders = [AddonLoader(r) for r in roots]
 
     results = []
@@ -301,9 +337,19 @@ def test_helpers_are_per_root(tmp_path: Path):
     assert results == ["ONE", "TWO"]
 
 
-def test_sibling_import_does_not_double_register(root: Root, loader: AddonLoader, problems):
-    write(root, "make_copy.py", "from tag_file_system import action\ncalls = []\ncalls.append(1)\n@action.added()\ndef run(p, m, c):\n    return 'copy'\n")
-    write(root, "sibling.py", "from tag_file_system import action\nimport make_copy\nfrom make_copy import run\n@action.modified()\ndef own(p, m, c):\n    return run(p, m, c)\n")
+def test_sibling_import_does_not_double_register(
+    root: Root, loader: AddonLoader, problems
+):
+    write(
+        root,
+        "make_copy.py",
+        "from tag_file_system import action\ncalls = []\ncalls.append(1)\n@action.added()\ndef run(p, m, c):\n    return 'copy'\n",
+    )
+    write(
+        root,
+        "sibling.py",
+        "from tag_file_system import action\nimport make_copy\nfrom make_copy import run\n@action.modified()\ndef own(p, m, c):\n    return run(p, m, c)\n",
+    )
 
     loader.load_all()
 
@@ -315,16 +361,28 @@ def test_sibling_import_does_not_double_register(root: Root, loader: AddonLoader
     assert problems == []
 
 
-def test_addons_never_shadow_installed_modules(root: Root, loader: AddonLoader, problems):
+def test_addons_never_shadow_installed_modules(
+    root: Root, loader: AddonLoader, problems
+):
     import json as stdlib_json
 
-    write(root, "json.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n")
-    write(root, "user.py", "from tag_file_system import action\nimport json\n@action.added()\ndef run(p, m, c):\n    return json.dumps({'a': 1})\n")
+    write(
+        root,
+        "json.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n",
+    )
+    write(
+        root,
+        "user.py",
+        "from tag_file_system import action\nimport json\n@action.added()\ndef run(p, m, c):\n    return json.dumps({'a': 1})\n",
+    )
 
     loader.load_all()
 
     assert sys.modules["json"] is stdlib_json
-    assert loader.handlers_for("user", Hook.ADDED)[0].func(None, None, None) == '{"a": 1}'
+    assert (
+        loader.handlers_for("user", Hook.ADDED)[0].func(None, None, None) == '{"a": 1}'
+    )
     loader.unload(root.script_dir / "json.py")
     assert sys.modules["json"] is stdlib_json
 
@@ -352,13 +410,26 @@ def test_lazy_helper_imports_work_after_load(root: Root, loader: AddonLoader):
     )
     loader.load_all()
 
-    assert loader.handlers_for("lazy", Hook.ADDED)[0].func(None, None, None) == ("lazy", "lazy")
+    assert loader.handlers_for("lazy", Hook.ADDED)[0].func(None, None, None) == (
+        "lazy",
+        "lazy",
+    )
 
 
-def test_helpers_are_shared_within_a_root_and_reloaded_on_change(root: Root, loader: AddonLoader):
+def test_helpers_are_shared_within_a_root_and_reloaded_on_change(
+    root: Root, loader: AddonLoader
+):
     write(root, "_state.py", "CACHE = {}\nCOUNT = [0]\nCOUNT[0] += 1\n")
-    write(root, "a.py", "from tag_file_system import action\nimport _state\n@action.added()\ndef run(p, m, c):\n    return _state\n")
-    write(root, "b.py", "from tag_file_system import action\nimport _state\n@action.added()\ndef run(p, m, c):\n    return _state\n")
+    write(
+        root,
+        "a.py",
+        "from tag_file_system import action\nimport _state\n@action.added()\ndef run(p, m, c):\n    return _state\n",
+    )
+    write(
+        root,
+        "b.py",
+        "from tag_file_system import action\nimport _state\n@action.added()\ndef run(p, m, c):\n    return _state\n",
+    )
 
     loader.load_all()
 
@@ -368,12 +439,24 @@ def test_helpers_are_shared_within_a_root_and_reloaded_on_change(root: Root, loa
 
     write(root, "_state.py", "CACHE = {'v': 2}\n")
     loader.load(root.script_dir / "_state.py")
-    assert loader.handlers_for("a", Hook.ADDED)[0].func(None, None, None).CACHE == {"v": 2}
+    assert loader.handlers_for("a", Hook.ADDED)[0].func(None, None, None).CACHE == {
+        "v": 2
+    }
 
 
-def test_reverse_order_sibling_import_executes_once(root: Root, loader: AddonLoader, problems):
-    write(root, "a.py", "from tag_file_system import action\nimport zed\n@action.modified()\ndef own(p, m, c):\n    return zed.run(p, m, c)\n")
-    write(root, "zed.py", "from tag_file_system import action\nruns = []\nruns.append(1)\n@action.added()\ndef run(p, m, c):\n    return 'zed'\n")
+def test_reverse_order_sibling_import_executes_once(
+    root: Root, loader: AddonLoader, problems
+):
+    write(
+        root,
+        "a.py",
+        "from tag_file_system import action\nimport zed\n@action.modified()\ndef own(p, m, c):\n    return zed.run(p, m, c)\n",
+    )
+    write(
+        root,
+        "zed.py",
+        "from tag_file_system import action\nruns = []\nruns.append(1)\n@action.added()\ndef run(p, m, c):\n    return 'zed'\n",
+    )
 
     loaded = loader.load_all()
 
@@ -385,8 +468,14 @@ def test_reverse_order_sibling_import_executes_once(root: Root, loader: AddonLoa
     assert problems == []
 
 
-def test_partials_and_helper_factories_are_handlers(root: Root, loader: AddonLoader, problems):
-    write(root, "_factory.py", "from tag_file_system import action\ndef make(tag):\n    @action.tagged(tag)\n    def h(p, m, c):\n        return tag\n    return h\n\n@action.warn()\ndef shared_notify(problem, ctx):\n    pass\n")
+def test_partials_and_helper_factories_are_handlers(
+    root: Root, loader: AddonLoader, problems
+):
+    write(
+        root,
+        "_factory.py",
+        "from tag_file_system import action\ndef make(tag):\n    @action.tagged(tag)\n    def h(p, m, c):\n        return tag\n    return h\n\n@action.warn()\ndef shared_notify(problem, ctx):\n    pass\n",
+    )
     write(
         root,
         "fac.py",
@@ -407,15 +496,28 @@ def test_partials_and_helper_factories_are_handlers(root: Root, loader: AddonLoa
 
     assert addon is not None
     # a partial has no source line, so it sorts after real functions
-    assert [h.spec.describe() for h in addon.file_handlers] == ["tagged:photos", "added"]
+    assert [h.spec.describe() for h in addon.file_handlers] == [
+        "tagged:photos",
+        "added",
+    ]
     assert [h.name for h in addon.problem_handlers] == ["shared_notify"]
     assert loader.handlers_for("fac", Hook.ADDED)[0].func(None, None, None) == 2
     assert problems == []
 
 
-def test_circular_sibling_imports_resolve_like_packages(root: Root, loader: AddonLoader, problems):
-    write(root, "a.py", "from tag_file_system import action\nimport b\n@action.added()\ndef run(p, m, c):\n    return 'a'\n")
-    write(root, "b.py", "from tag_file_system import action\nimport a\n@action.modified()\ndef run(p, m, c):\n    return 'b'\n")
+def test_circular_sibling_imports_resolve_like_packages(
+    root: Root, loader: AddonLoader, problems
+):
+    write(
+        root,
+        "a.py",
+        "from tag_file_system import action\nimport b\n@action.added()\ndef run(p, m, c):\n    return 'a'\n",
+    )
+    write(
+        root,
+        "b.py",
+        "from tag_file_system import action\nimport a\n@action.modified()\ndef run(p, m, c):\n    return 'b'\n",
+    )
 
     loaded = loader.load_all()
 
@@ -426,18 +528,32 @@ def test_circular_sibling_imports_resolve_like_packages(root: Root, loader: Addo
 
 def test_lazy_helper_imports_write_no_pycache(root: Root, loader: AddonLoader):
     write(root, "_late.py", "VALUE = 1\n")
-    write(root, "lazy.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    from _late import VALUE\n    return VALUE\n")
+    write(
+        root,
+        "lazy.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    from _late import VALUE\n    return VALUE\n",
+    )
     loader.load_all()
 
     assert loader.handlers_for("lazy", Hook.ADDED)[0].func(None, None, None) == 1
     assert not (root.script_dir / "__pycache__").exists()
 
 
-def test_load_all_ignores_non_py_files_sharing_a_stem(root: Root, loader: AddonLoader, problems):
-    write(root, "ok.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n")
+def test_load_all_ignores_non_py_files_sharing_a_stem(
+    root: Root, loader: AddonLoader, problems
+):
+    write(
+        root,
+        "ok.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n",
+    )
     (root.script_dir / "ok.pyc").write_bytes(b"\x00")
     (root.script_dir / "ok.txt").write_text("x")
-    write(root, "user.py", "from tag_file_system import action\nimport broken\n@action.added()\ndef run(p, m, c): pass\n")
+    write(
+        root,
+        "user.py",
+        "from tag_file_system import action\nimport broken\n@action.added()\ndef run(p, m, c): pass\n",
+    )
     write(root, "broken.py", "def run(:\n")
 
     loaded = loader.load_all()
@@ -449,21 +565,33 @@ def test_load_all_ignores_non_py_files_sharing_a_stem(root: Root, loader: AddonL
 def test_classes_defined_in_addons_can_be_pickled(root: Root, loader: AddonLoader):
     import pickle
 
-    write(root, "kinds.py", "import enum\nfrom tag_file_system import action\nclass Kind(enum.Enum):\n    A = 1\n@action.added()\ndef run(p, m, c):\n    return Kind.A\n")
+    write(
+        root,
+        "kinds.py",
+        "import enum\nfrom tag_file_system import action\nclass Kind(enum.Enum):\n    A = 1\n@action.added()\ndef run(p, m, c):\n    return Kind.A\n",
+    )
     loader.load(root.script_dir / "kinds.py")
     value = loader.handlers_for("kinds", Hook.ADDED)[0].func(None, None, None)
 
     assert pickle.loads(pickle.dumps(value)) is value
 
 
-def test_symlinked_scripts_do_not_abort_loading(root: Root, loader: AddonLoader, tmp_path: Path):
+def test_symlinked_scripts_do_not_abort_loading(
+    root: Root, loader: AddonLoader, tmp_path: Path
+):
     outside = tmp_path / "outside.py"
-    outside.write_text("from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n")
+    outside.write_text(
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n"
+    )
     try:
         (root.script_dir / "linked.py").symlink_to(outside)
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not permitted here")
-    write(root, "zz_ok.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n")
+    write(
+        root,
+        "zz_ok.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): pass\n",
+    )
 
     loaded = loader.load_all()
 
@@ -477,9 +605,17 @@ def test_empty_and_all_broken_addons(root: Root, loader: AddonLoader, problems):
     assert loader.load(root.script_dir / "empty.py") is not None
     assert [p[1] for p in problems] == ["addon.empty"]
 
-    path = write(root, "r.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c): return 1\n")
+    path = write(
+        root,
+        "r.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): return 1\n",
+    )
     good = loader.load(path)
-    write(root, "r.py", "from tag_file_system import action\n@action.added()\ndef run(p): pass\n")
+    write(
+        root,
+        "r.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p): pass\n",
+    )
     assert loader.load(path) is None  # all handlers broken: previous kept
     assert loader.addon_for("r") is good
     assert problems[-1][1] == "addon.signature"
@@ -501,13 +637,25 @@ def test_store_failure_keeps_the_previous_addon(root: Root, tmp_path: Path):
     backend.init_database(root.db_path, root_dir=root.path)
     store = ActionStore(backend)
     reports: list[tuple] = []
-    loader = AddonLoader(root, store=store, report=lambda s, k, m, *, action_name=None: reports.append((s, k)))
-    path = write(root, "ok.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c): return 1\n")
+    loader = AddonLoader(
+        root,
+        store=store,
+        report=lambda s, k, m, *, action_name=None: reports.append((s, k)),
+    )
+    path = write(
+        root,
+        "ok.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): return 1\n",
+    )
     first = loader.load(path)
     assert first is not None and first.record is not None
 
     backend.close()
-    write(root, "ok.py", "from tag_file_system import action\n@action.added()\ndef run(p, m, c): return 2\n")
+    write(
+        root,
+        "ok.py",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c): return 2\n",
+    )
     assert loader.load(path) is None
     assert loader.addon_for("ok") is first
     assert reports[-1] == (Severity.CRIT, "db.unwritable")
@@ -564,7 +712,9 @@ def test_loader_registers_actions_in_the_store(root: Root, tmp_path: Path):
     assert set(record.hooks) == {Hook.ADDED, Hook.REMOVED, Hook.TAGGED}
     assert record.signature["added"].get("required", []) == []
 
-    write(root, "make_copy.py", MAKE_COPY.replace('return "v1"', 'return "v1"  # changed'))
+    write(
+        root, "make_copy.py", MAKE_COPY.replace('return "v1"', 'return "v1"  # changed')
+    )
     loader.load(path)
     assert len(store.query_actions("make_copy")) == 2
     backend.close()

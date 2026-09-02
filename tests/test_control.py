@@ -15,7 +15,11 @@ import pytest
 from tag_file_system.addons.loader import MODULE_PREFIX
 from tag_file_system.config import Config, DaemonConfig
 from tag_file_system.root import Root
-from tag_file_system.services.control import ControlClient, ControlError, ControlUnavailable
+from tag_file_system.services.control import (
+    ControlClient,
+    ControlError,
+    ControlUnavailable,
+)
 from tag_file_system.services.daemon import Daemon
 
 ADDON = """
@@ -43,7 +47,9 @@ def clean_modules():
 @pytest.fixture
 def root(tmp_path: Path) -> Root:
     root = Root.init(tmp_path / "vault")
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(root.config_path)
+    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
+        root.config_path
+    )
     (root.script_dir / "copy.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
     (root.path / "@@copy" / "a--photo.txt").parent.mkdir()
     (root.path / "@@copy" / "a--photo.txt").write_text("a")
@@ -90,7 +96,9 @@ def test_health_actions_and_files(root: Root, daemon: Daemon, client: ControlCli
     assert client.files(mime="image/*") == []
 
 
-def test_load_problems_are_reported_by_the_daemon(root: Root, daemon: Daemon, client: ControlClient):
+def test_load_problems_are_reported_by_the_daemon(
+    root: Root, daemon: Daemon, client: ControlClient
+):
     (root.script_dir / "Bad.py").write_text("x = 1\n")
     (root.script_dir / "broken.py").write_text("def run(:\n")
     client.reload()
@@ -147,7 +155,9 @@ def test_unavailable_message_has_no_status_prefix(root: Root):
 
 def test_reload_and_stop(root: Root, daemon: Daemon, client: ControlClient):
     (root.script_dir / "extra.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
-    Config(daemon=root.load_config().daemon, remotes={"x": "/x"}).write(root.config_path)
+    Config(daemon=root.load_config().daemon, remotes={"x": "/x"}).write(
+        root.config_path
+    )
 
     result = client.reload()
 
@@ -171,7 +181,9 @@ def test_token_and_routing(root: Root, daemon: Daemon, client: ControlClient):
     config = root.load_config()
     base = f"http://127.0.0.1:{config.daemon.port}"
 
-    def call(path: str, method: str = "GET", token: str | None = None) -> tuple[int, dict]:
+    def call(
+        path: str, method: str = "GET", token: str | None = None
+    ) -> tuple[int, dict]:
         headers = {"Authorization": f"Bearer {token}"} if token else {}
         request = urllib.request.Request(base + path, method=method, headers=headers)
         try:
@@ -197,4 +209,6 @@ def test_token_and_routing(root: Root, daemon: Daemon, client: ControlClient):
 def test_unavailable_when_no_daemon(root: Root):
     config = root.load_config()
     with pytest.raises(ControlUnavailable):
-        ControlClient(config.daemon.bind, config.daemon.port, root.read_token(), timeout=1).health()
+        ControlClient(
+            config.daemon.bind, config.daemon.port, root.read_token(), timeout=1
+        ).health()

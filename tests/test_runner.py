@@ -13,7 +13,6 @@ from tag_file_system.addons.runner import ActionRunner
 from tag_file_system.config import Config, DaemonConfig
 from tag_file_system.core.interface.action import (
     Hook,
-    ProvenanceKind,
     RunSource,
     RunStatus,
     Severity,
@@ -41,17 +40,26 @@ def env(tmp_path: Path):
         daemon=DaemonConfig(run_warn_after_seconds=0.05, stop_timeout_seconds=0.2),
         remotes={"backup": str(tmp_path / "backup")},
     )
-    runner = ActionRunner(root, backend, store, loader, config=config, max_chain_depth=3)
+    runner = ActionRunner(
+        root, backend, store, loader, config=config, max_chain_depth=3
+    )
     loader.report = runner.problem
     (tmp_path / "backup").mkdir()
     yield SimpleNamespace(
-        root=root, backend=backend, store=store, loader=loader, runner=runner, tmp=tmp_path
+        root=root,
+        backend=backend,
+        store=store,
+        loader=loader,
+        runner=runner,
+        tmp=tmp_path,
     )
     backend.close()
 
 
 def script(env, name: str, source: str) -> None:
-    (env.root.script_dir / f"{name}.py").write_text(textwrap.dedent(source), encoding="utf-8")
+    (env.root.script_dir / f"{name}.py").write_text(
+        textwrap.dedent(source), encoding="utf-8"
+    )
     env.loader.load_all()
 
 
@@ -113,7 +121,9 @@ def test_added_handler_runs_once_with_trace_and_provenance(env):
     assert produced == ["out/a--copy.md"]
     copy = env.backend.query_file("out/a--copy.md")
     assert copy is not None and [t.name for t in copy.tags] == ["copy"]
-    assert [p.kind for p in env.store.query_provenance(file_path="out/a--copy.md")] == ["emitted"]
+    assert [p.kind for p in env.store.query_provenance(file_path="out/a--copy.md")] == [
+        "emitted"
+    ]
     assert [p.kind for p in problems(env)] == ["run.ok"]
 
     # the same event again: the key exists, nothing re-runs
@@ -123,7 +133,7 @@ def test_added_handler_runs_once_with_trace_and_provenance(env):
 
 
 def test_generated_file_never_retriggers_its_producer(env):
-    script(env, "make_copy", MAKE_COPY.replace('ctx.root / "out" /', 'path.parent /'))
+    script(env, "make_copy", MAKE_COPY.replace('ctx.root / "out" /', "path.parent /"))
     path, file, parsed = add_file(env, "@@make_copy/a.txt")
     (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
     assert env.store.produced_by(run.id) == ["@@make_copy/a--copy.txt"]
@@ -132,7 +142,10 @@ def test_generated_file_never_retriggers_its_producer(env):
     copy = env.backend.query_file(copy_path)
     assert copy is not None
     again = env.runner.on_file(
-        Hook.ADDED, copy_path, copy, env.runner.parser.parse_path(PurePosixPath("@@make_copy/a--copy.txt"))
+        Hook.ADDED,
+        copy_path,
+        copy,
+        env.runner.parser.parse_path(PurePosixPath("@@make_copy/a--copy.txt")),
     )
 
     assert again == []
@@ -140,7 +153,11 @@ def test_generated_file_never_retriggers_its_producer(env):
 
 
 def test_unbound_and_binding_problems(env):
-    script(env, "resize", "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: int): pass\n")
+    script(
+        env,
+        "resize",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: int): pass\n",
+    )
     path, file, parsed = add_file(env, "@@nosuch/@@resize__wide/a.txt")
 
     runs = env.runner.on_file(Hook.ADDED, path, file, parsed)
@@ -208,7 +225,9 @@ def test_problem_handler_failure_is_logged_not_redispatched(env):
 
     assert env.loader.addon_for("watchdog").module.calls == ["test.kind"]
     assert env.store.get_problem(record.id).delivered_at is None  # nobody handled it
-    assert env.runner.problem(Severity.INFO, "quiet", "x").delivered_at is None  # warn does not cover info
+    assert (
+        env.runner.problem(Severity.INFO, "quiet", "x").delivered_at is None
+    )  # warn does not cover info
 
 
 def test_replay_undelivered_problems_at_start(env):
@@ -351,14 +370,18 @@ def test_spawn_keeps_the_run_open_until_done(env):
 
     env.loader.addon_for("bg").module.gate.set()
     deadline = time.time() + 5
-    while env.store.get_run(run.id).status is RunStatus.RUNNING and time.time() < deadline:
+    while (
+        env.store.get_run(run.id).status is RunStatus.RUNNING and time.time() < deadline
+    ):
         time.sleep(0.01)
 
     finished = env.store.get_run(run.id)
     assert finished.status is RunStatus.OK
     assert finished.result == {"bg": True}
     assert run.id not in env.runner.in_flight
-    assert [t.payload for t in env.store.query_trace(run.id) if t.kind == "record"] == [{"worker": "finished"}]
+    assert [t.payload for t in env.store.query_trace(run.id) if t.kind == "record"] == [
+        {"worker": "finished"}
+    ]
 
 
 def test_stop_interrupts_runs_that_never_finish(env):
@@ -467,7 +490,9 @@ def test_resolve_remote_and_tagdir(env):
     assert run.status is RunStatus.OK, run.error
     assert (env.root.path / "2024--archive" / "a.txt").exists()
     assert (env.tmp / "backup" / "a.txt").exists()
-    assert env.store.produced_by(run.id) == ["2024--archive/a.txt"]  # remote output is outside the root
+    assert env.store.produced_by(run.id) == [
+        "2024--archive/a.txt"
+    ]  # remote output is outside the root
     emits = [t.payload for t in env.store.query_trace(run.id) if t.kind == "emit"]
     assert emits[1]["indexed"] is False
 
@@ -523,13 +548,20 @@ def test_capture_is_per_thread_and_leaves_nothing_behind(env):
     )
     path, file, parsed = add_file(env, "@@loud/a.txt")
     (slow,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
-    (fast,) = env.runner.on_file(Hook.MODIFIED, path, file, parsed)  # while slow is in flight
+    (fast,) = env.runner.on_file(
+        Hook.MODIFIED, path, file, parsed
+    )  # while slow is in flight
     env.loader.addon_for("loud").module.gate.set()
     deadline = time.time() + 5
-    while env.store.get_run(slow.id).status is RunStatus.RUNNING and time.time() < deadline:
+    while (
+        env.store.get_run(slow.id).status is RunStatus.RUNNING
+        and time.time() < deadline
+    ):
         time.sleep(0.01)
 
-    assert [t.payload for t in env.store.query_trace(fast.id)] == ["stdout: quick print"]
+    assert [t.payload for t in env.store.query_trace(fast.id)] == [
+        "stdout: quick print"
+    ]
     assert [t.payload for t in env.store.query_trace(slow.id)] == [
         "stdout: early print",
         "stdout: late print",
@@ -537,7 +569,11 @@ def test_capture_is_per_thread_and_leaves_nothing_behind(env):
     ]
     # nothing captured outside a run, and the streams still work
     print("outside")
-    assert not any("outside" in str(t.payload) for run in (slow, fast) for t in env.store.query_trace(run.id))
+    assert not any(
+        "outside" in str(t.payload)
+        for run in (slow, fast)
+        for t in env.store.query_trace(run.id)
+    )
     assert sys.stdout.writable()
 
 
@@ -567,7 +603,9 @@ def test_ctx_tag_normalizes_and_index_keeps_ctx_tags(env):
 
     tagged = env.backend.query_file(path)
     assert [t.name for t in tagged.tags] == ["photo"]
-    assert len(env.store.query_runs(action_name="tagger", status=RunStatus.OK)) == 2  # added + one tagged
+    assert (
+        len(env.store.query_runs(action_name="tagger", status=RunStatus.OK)) == 2
+    )  # added + one tagged
     out = env.backend.query_file("out/r--fromname.txt")
     assert sorted(t.name for t in out.tags) == ["fromctx", "fromname"]
 
@@ -610,26 +648,46 @@ def test_index_refuses_tfs_and_script_zones(env):
 
 
 def test_binding_failure_key_matches_a_later_success(env):
-    script(env, "resize", "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: int): return width\n")
+    script(
+        env,
+        "resize",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: int): return width\n",
+    )
     path, file, parsed = add_file(env, "@@resize__wide/a.txt")
     (failed,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
     assert failed.status is RunStatus.FAILED and failed.args == {"width": "wide"}
 
     # editing the script does not re-run a dead key (DESIGN §6.1)
-    script(env, "resize", "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: str): return width\n")
+    script(
+        env,
+        "resize",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: str): return width\n",
+    )
     assert env.runner.on_file(Hook.ADDED, path, file, parsed) == []
 
     retried = env.runner.retry(failed.id)
-    assert retried is not None and retried.status is RunStatus.OK and retried.result == "wide"
+    assert (
+        retried is not None
+        and retried.status is RunStatus.OK
+        and retried.result == "wide"
+    )
 
 
 def test_retry_rules(env):
-    script(env, "flaky2", "from tag_file_system import action\n@action.added()\ndef run(p, m, c, n: int = 1):\n    raise RuntimeError('x')\n")
+    script(
+        env,
+        "flaky2",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, n: int = 1):\n    raise RuntimeError('x')\n",
+    )
     path, file, parsed = add_file(env, "@@flaky2__3/a.txt")
     (failed,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
 
     # signature changed since: the old key cannot be retried
-    script(env, "flaky2", "from tag_file_system import action\n@action.added()\ndef run(p, m, c, count: int = 1):\n    return count\n")
+    script(
+        env,
+        "flaky2",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, count: int = 1):\n    return count\n",
+    )
     assert env.runner.retry(failed.id) is None
     assert problems(env, "retry.key_changed")
 
@@ -645,7 +703,11 @@ def test_retry_rules(env):
 
 
 def test_sys_exit_in_a_handler_is_a_failed_run(env):
-    script(env, "quit", "import sys\nfrom tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    sys.exit(3)\n")
+    script(
+        env,
+        "quit",
+        "import sys\nfrom tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    sys.exit(3)\n",
+    )
     path, file, parsed = add_file(env, "@@quit/a.txt")
 
     (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
@@ -655,8 +717,16 @@ def test_sys_exit_in_a_handler_is_a_failed_run(env):
 
 
 def test_emitted_file_in_another_action_dir_runs_as_a_chain(env):
-    script(env, "producer", "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    c.write(c.root / '@@consumer' / 'made.txt', 'x')\n")
-    script(env, "consumer", "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    return 'consumed'\n")
+    script(
+        env,
+        "producer",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    c.write(c.root / '@@consumer' / 'made.txt', 'x')\n",
+    )
+    script(
+        env,
+        "consumer",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    return 'consumed'\n",
+    )
     path, file, parsed = add_file(env, "@@producer/a.txt")
 
     (produced,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
@@ -667,7 +737,15 @@ def test_emitted_file_in_another_action_dir_runs_as_a_chain(env):
     # the watcher's later event for made.txt finds the key and does nothing
     made = env.root.absolute("@@consumer/made.txt")
     made_file = env.backend.query_file(made)
-    assert env.runner.on_file(Hook.ADDED, made, made_file, env.runner.parser.parse_path(PurePosixPath("@@consumer/made.txt"))) == []
+    assert (
+        env.runner.on_file(
+            Hook.ADDED,
+            made,
+            made_file,
+            env.runner.parser.parse_path(PurePosixPath("@@consumer/made.txt")),
+        )
+        == []
+    )
 
 
 def test_problems_from_runs_started_in_a_handler_are_delivered_after_it(env):
@@ -699,7 +777,11 @@ def test_problems_from_runs_started_in_a_handler_are_delivered_after_it(env):
 
 
 def test_thread_failure_without_done_fails_the_run(env):
-    script(env, "crashy", "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    def w():\n        raise RuntimeError('in thread')\n    t = c.spawn(w)\n    t.join()\n")
+    script(
+        env,
+        "crashy",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    def w():\n        raise RuntimeError('in thread')\n    t = c.spawn(w)\n    t.join()\n",
+    )
     path, file, parsed = add_file(env, "@@crashy/a.txt")
 
     (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
@@ -738,12 +820,16 @@ def test_addon_stream_swaps_do_not_outlive_the_run(env):
 
     env.runner.on_file(Hook.ADDED, path, file, parsed)
 
-    after = sys.stdout  # the dispatcher wrapping what was there before, not the add-on's buffer
+    after = (
+        sys.stdout
+    )  # the dispatcher wrapping what was there before, not the add-on's buffer
     assert after is before or getattr(after, "original", None) is before
     assert not isinstance(getattr(after, "original", after), io.StringIO)
     assert not sys.stdout.closed and not sys.stderr.closed
     (again,) = env.runner.on_file(Hook.MODIFIED, path, file, parsed)
-    assert [t.payload for t in env.store.query_trace(again.id)] == ["info: still captured"]
+    assert [t.payload for t in env.store.query_trace(again.id)] == [
+        "info: still captured"
+    ]
     assert logging.getLogger().level <= logging.INFO
 
 

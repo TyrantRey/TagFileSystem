@@ -37,7 +37,11 @@ _CACHE_ATTR = "__tfs_binding__"
 
 def callable_name(func: Callable) -> str:
     """``__qualname__`` when there is one; any callable is accepted."""
-    return getattr(func, "__qualname__", None) or getattr(func, "__name__", None) or repr(func)
+    return (
+        getattr(func, "__qualname__", None)
+        or getattr(func, "__name__", None)
+        or repr(func)
+    )
 
 
 class SignatureError(TypeError):
@@ -164,7 +168,12 @@ def parameters_of(func: Callable, fixed: int = FIXED_PARAMETERS) -> list[Paramet
                 f"use action.TagDir or action.Remote (DESIGN.md §4.4)"
             )
         result.append(
-            Parameter(name=param.name, annotation=base, path_kind=path_kind, default=param.default)
+            Parameter(
+                name=param.name,
+                annotation=base,
+                path_kind=path_kind,
+                default=param.default,
+            )
         )
     return result
 
@@ -256,7 +265,9 @@ def _coerce_literal(annotation: Any, raw: str) -> Any:
 _BOOL = TypeAdapter(bool)
 
 
-def raw_by_name(func: Callable, raw_args: tuple[str, ...] | list[str]) -> dict[str, Any]:
+def raw_by_name(
+    func: Callable, raw_args: tuple[str, ...] | list[str]
+) -> dict[str, Any]:
     """The run-key ``args`` for a call: slug strings keyed by parameter name,
     computable even when binding will fail (so a failed binding and a later
     success share one key). Surplus positional strings go under ``_extra``."""

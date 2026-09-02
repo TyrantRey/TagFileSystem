@@ -40,7 +40,9 @@ class MigrationReport:
     relativized: int = 0  # files.path rows rewritten to root-relative
     outside_root: list[str] = field(default_factory=list)  # soft-deleted
     conflicts: list[str] = field(default_factory=list)  # soft-deleted (dup key)
-    parked: list[str] = field(default_factory=list)  # dead rows moved under .tfs/duplicates
+    parked: list[str] = field(
+        default_factory=list
+    )  # dead rows moved under .tfs/duplicates
 
     @property
     def applied(self) -> bool:

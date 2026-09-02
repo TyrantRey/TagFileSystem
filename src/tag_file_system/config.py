@@ -42,7 +42,9 @@ class LoggingConfig(BaseModel):
     def validate_level(cls, v: str) -> str:
         level = v.strip().upper()
         if level not in LOG_LEVELS:
-            raise ValueError(f"Invalid log level {v!r}; expected one of {sorted(LOG_LEVELS)}")
+            raise ValueError(
+                f"Invalid log level {v!r}; expected one of {sorted(LOG_LEVELS)}"
+            )
         return level
 
     _relative = field_validator("file")(_relative_path)
@@ -54,8 +56,12 @@ class DaemonConfig(BaseModel):
     bind: str = "127.0.0.1"
     # strict: TOML is typed, so "80" or true for a port is a mistake to report
     port: int = Field(default=7411, ge=1, le=65535, strict=True)
-    stop_timeout_seconds: float = Field(default=30, ge=0, strict=True, allow_inf_nan=False)
-    run_warn_after_seconds: float = Field(default=300, gt=0, strict=True, allow_inf_nan=False)
+    stop_timeout_seconds: float = Field(
+        default=30, ge=0, strict=True, allow_inf_nan=False
+    )
+    run_warn_after_seconds: float = Field(
+        default=300, gt=0, strict=True, allow_inf_nan=False
+    )
 
     @field_validator("bind")
     @classmethod
@@ -91,13 +97,17 @@ class Config(BaseModel):
                     raise ValueError("Remote names cannot be empty")
                 if not isinstance(target, str) or not target.strip():
                     raise ValueError(f"Remote {name!r} must be a non-empty path string")
-                rooted = bool(PurePosixPath(target).root or PureWindowsPath(target).root)
+                rooted = bool(
+                    PurePosixPath(target).root or PureWindowsPath(target).root
+                )
                 if not is_anchored(target) or not rooted:
                     raise ValueError(
                         f"Remote {name!r} must be an absolute path (outside the root), got {target!r}"
                     )
                 if has_parent_reference(PurePosixPath(target.replace("\\", "/"))):
-                    raise ValueError(f"Remote {name!r} may not contain '..': {target!r}")
+                    raise ValueError(
+                        f"Remote {name!r} may not contain '..': {target!r}"
+                    )
         return v
 
     # ------------------------------------------------------------------- io
@@ -141,7 +151,7 @@ class Config(BaseModel):
             f"stop_timeout_seconds = {_toml_num(self.daemon.stop_timeout_seconds)}",
             f"run_warn_after_seconds = {_toml_num(self.daemon.run_warn_after_seconds)}   # running longer raises P2",
             "",
-            "[remotes]   # named destinations outside the root, e.g. photos = \"/home/photo\"",
+            '[remotes]   # named destinations outside the root, e.g. photos = "/home/photo"',
         ]
         for name, target in self.remotes.items():
             lines.append(f"{_toml_key(name)} = {_toml_str(target)}")

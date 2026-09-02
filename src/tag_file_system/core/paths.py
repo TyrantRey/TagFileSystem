@@ -9,7 +9,7 @@ Root-relative POSIX keys are what the database stores and what
 
 import posixpath
 import re
-from pathlib import PurePath, PurePosixPath
+from pathlib import PurePath
 
 # "C:\..." / "C:/...": a drive is an anchor only with a separator after it,
 # so that a POSIX filename such as "a:b.txt" is not mistaken for one.

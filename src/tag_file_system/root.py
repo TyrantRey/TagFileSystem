@@ -2,10 +2,10 @@
 
 """The managed root (DESIGN.md §2): discovery, ``init``, zones, lock, token.
 
-    <root>/
-      .tfs/config.toml   .tfs/db/   .tfs/lock   .tfs/token
-      script/            add-ons
-      ...                everything else is managed data
+<root>/
+  .tfs/config.toml   .tfs/db/   .tfs/lock   .tfs/token
+  script/            add-ons
+  ...                everything else is managed data
 """
 
 import json
@@ -159,7 +159,9 @@ class Root:
         start = Path.cwd() if start is None else start
         found = find_root(start)
         if found is None:
-            raise NotARoot(f"{Path(start).resolve()} is not inside a TagFileSystem root")
+            raise NotARoot(
+                f"{Path(start).resolve()} is not inside a TagFileSystem root"
+            )
         return cls(found)
 
     @classmethod

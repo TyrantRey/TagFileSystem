@@ -106,7 +106,9 @@ class ActionStore:
     def _lock(self) -> threading.RLock:
         return self.backend._lock
 
-    def _file_id(self, cursor: sqlite3.Cursor, file_path: PathLike | None) -> str | None:
+    def _file_id(
+        self, cursor: sqlite3.Cursor, file_path: PathLike | None
+    ) -> str | None:
         if file_path is None:
             return None
         try:
@@ -119,8 +121,15 @@ class ActionStore:
         row = cursor.execute("SELECT id FROM files WHERE path = ?", (key,)).fetchone()
         return row["id"] if row is not None else None
 
-    def _require_run(self, cursor: sqlite3.Cursor, run_id: str, what: str = "run") -> None:
-        if cursor.execute("SELECT 1 FROM action_runs WHERE id = ?", (run_id,)).fetchone() is None:
+    def _require_run(
+        self, cursor: sqlite3.Cursor, run_id: str, what: str = "run"
+    ) -> None:
+        if (
+            cursor.execute(
+                "SELECT 1 FROM action_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            is None
+        ):
             raise KeyError(f"unknown {what} {run_id}")
 
     # ---------------------------------------------------------------- actions
@@ -159,7 +168,15 @@ class ActionStore:
                     (id, name, script_path, script_hash, signature_json, hooks_json, loaded_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (action_id, name, script_text, script_hash, signature_json, hooks_json, now),
+                (
+                    action_id,
+                    name,
+                    script_text,
+                    script_hash,
+                    signature_json,
+                    hooks_json,
+                    now,
+                ),
             )
         else:
             action_id = row["id"]
@@ -253,7 +270,9 @@ class ActionStore:
             if previous is None:
                 raise KeyError(f"unknown run {retry_of}")
             if previous.key != key:
-                raise ValueError(f"run {retry_of} has a different key; cannot retry it here")
+                raise ValueError(
+                    f"run {retry_of} has a different key; cannot retry it here"
+                )
             if existing is not None and not existing.status.is_final:
                 raise RunExists(existing)
         elif existing is not None:
@@ -364,7 +383,9 @@ class ActionStore:
             clauses.append("r.action_name = ?")
             params.append(action_name)
         if status is not None:
-            statuses = [status] if isinstance(status, (RunStatus, str)) else list(status)
+            statuses = (
+                [status] if isinstance(status, (RunStatus, str)) else list(status)
+            )
             clauses.append(f"r.status IN ({_placeholders(len(statuses))})")
             params.extend(RunStatus(s).value for s in statuses)
         if since is not None:
@@ -389,7 +410,9 @@ class ActionStore:
             params.append(int(limit))
         return [self._row_to_run(r) for r in cursor.execute(sql, params)]
 
-    def _file_row(self, cursor: sqlite3.Cursor, file_path: PathLike) -> sqlite3.Row | None:
+    def _file_row(
+        self, cursor: sqlite3.Cursor, file_path: PathLike
+    ) -> sqlite3.Row | None:
         try:
             key = self.backend.key(file_path)
         except ValueError:
@@ -535,7 +558,8 @@ class ActionStore:
                 (file_id, run_id),
             )
         row = cursor.execute(
-            "SELECT * FROM provenance WHERE file_id = ? AND run_id = ?", (file_id, run_id)
+            "SELECT * FROM provenance WHERE file_id = ? AND run_id = ?",
+            (file_id, run_id),
         ).fetchone()
         return self._row_to_provenance(row)
 

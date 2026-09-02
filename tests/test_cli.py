@@ -1,6 +1,5 @@
 # Code by AkinoAlice@TyrantRey
 
-import os
 import json
 import socket
 import subprocess
@@ -52,7 +51,9 @@ def root(tmp_path: Path) -> Root:
     result = runner.invoke(app, ["init", str(tmp_path / "vault")])
     assert result.exit_code == 0, result.output
     root = Root(tmp_path / "vault")
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(root.config_path)
+    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
+        root.config_path
+    )
     (root.script_dir / "copy.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
     (root.path / "@@copy" / "a--photo.txt").parent.mkdir()
     (root.path / "@@copy" / "a--photo.txt").write_text("a")
@@ -104,8 +105,15 @@ def test_list_without_a_daemon_loads_scripts_directly(root: Root):
 
     assert result.exit_code == 0, result.output
     assert "no daemon running" in result.output
-    assert "copy" in result.output and "added" in result.output and "on err" in result.output
-    assert "suffix: string = '.bak'" in result.output and "width: integer = 1" in result.output
+    assert (
+        "copy" in result.output
+        and "added" in result.output
+        and "on err" in result.output
+    )
+    assert (
+        "suffix: string = '.bak'" in result.output
+        and "width: integer = 1" in result.output
+    )
     assert "[warn] addon.filename" in result.output
 
     as_json = json.loads(tfs("list", "--root", str(root.path), "--json").output)
@@ -125,7 +133,11 @@ def test_list_and_query_through_the_daemon(root: Root, daemon: Daemon):
     nothing = tfs("query", "--root", str(root.path), "-t", "nope")
     assert "(no files)" in nothing.output
 
-    with_runs = json.loads(tfs("query", "--root", str(root.path), "--under", "@@copy", "--runs", "--json").output)
+    with_runs = json.loads(
+        tfs(
+            "query", "--root", str(root.path), "--under", "@@copy", "--runs", "--json"
+        ).output
+    )
     assert with_runs[0]["runs"][0]["action_name"] == "copy"
 
     reloaded = tfs("reload", "--root", str(root.path))
@@ -164,13 +176,22 @@ def test_stop_never_signals_a_pid_from_another_host(root: Root):
     sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
     try:
         root.lock_path.write_text(
-            json.dumps({"pid": sleeper.pid, "hostname": "some-other-nas", "created_at": time.time()})
+            json.dumps(
+                {
+                    "pid": sleeper.pid,
+                    "hostname": "some-other-nas",
+                    "created_at": time.time(),
+                }
+            )
         )
 
         result = tfs("stop", "--root", str(root.path))
 
         assert result.exit_code == 1
-        assert "some-other-nas" in result.output and "stop it on that machine" in result.output
+        assert (
+            "some-other-nas" in result.output
+            and "stop it on that machine" in result.output
+        )
         assert sleeper.poll() is None  # untouched
     finally:
         sleeper.kill()
@@ -190,7 +211,9 @@ def test_start_detached_reports_a_child_that_dies(root: Root, daemon: Daemon):
     while daemon.backend.is_open and time.time() < deadline:
         time.sleep(0.05)
     config = root.load_config()
-    Config(daemon=DaemonConfig(bind="203.0.113.1", port=config.daemon.port)).write(root.config_path)
+    Config(daemon=DaemonConfig(bind="203.0.113.1", port=config.daemon.port)).write(
+        root.config_path
+    )
 
     result = tfs("start", "-d", "--root", str(root.path))
 
@@ -199,7 +222,9 @@ def test_start_detached_reports_a_child_that_dies(root: Root, daemon: Daemon):
     assert "control channel" in result.output
 
 
-def test_a_second_root_cannot_share_the_control_port(root: Root, daemon: Daemon, tmp_path: Path):
+def test_a_second_root_cannot_share_the_control_port(
+    root: Root, daemon: Daemon, tmp_path: Path
+):
     other = Root.init(tmp_path / "second")
     Config(daemon=root.load_config().daemon).write(other.config_path)  # same port
 
@@ -229,9 +254,13 @@ def test_force_does_not_start_a_second_daemon_on_one_root(root: Root):
         sleeper.wait()
 
 
-def test_stop_reaches_the_daemon_after_the_config_port_changed(root: Root, daemon: Daemon):
+def test_stop_reaches_the_daemon_after_the_config_port_changed(
+    root: Root, daemon: Daemon
+):
     config = root.load_config()
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(root.config_path)
+    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
+        root.config_path
+    )
     holder = Lock(root).holder()
     assert holder is not None and holder.port == config.daemon.port
 
@@ -245,7 +274,9 @@ def test_stop_reaches_the_daemon_after_the_config_port_changed(root: Root, daemo
 def test_another_roots_daemon_on_the_port_does_not_hide_this_root(
     root: Root, daemon: Daemon, tmp_path: Path
 ):
-    other = Root.init(tmp_path / "second")  # same default-ish port, no daemon of its own
+    other = Root.init(
+        tmp_path / "second"
+    )  # same default-ish port, no daemon of its own
     Config(daemon=root.load_config().daemon).write(other.config_path)
     (other.path / "b--own.txt").write_text("b")
     indexer = Daemon(other)  # index it, then leave no daemon running
@@ -311,7 +342,10 @@ def test_fallbacks_survive_a_broken_config_or_token(root: Root):
     root.config_path.write_text("[daemon]\nport = 'x'\n")
 
     assert tfs("list", "--root", str(root.path)).exit_code == 0
-    assert "@@copy/a--photo.txt" in tfs("query", "--root", str(root.path), "-t", "photo").output
+    assert (
+        "@@copy/a--photo.txt"
+        in tfs("query", "--root", str(root.path), "-t", "photo").output
+    )
     stop = tfs("stop", "--root", str(root.path))
     assert stop.exit_code == 1 and "no daemon is running" in stop.output
 
@@ -351,7 +385,9 @@ def test_start_foreground_runs_until_stopped(root: Root):
     config = root.load_config()
     from tag_file_system.services.control import ControlClient
 
-    client = ControlClient(config.daemon.bind, config.daemon.port, root.read_token(), timeout=2)
+    client = ControlClient(
+        config.daemon.bind, config.daemon.port, root.read_token(), timeout=2
+    )
     box: dict = {}
 
     def run() -> None:

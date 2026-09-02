@@ -2,9 +2,9 @@
 
 """Models produced by the name grammar (DESIGN.md §3).
 
-    segment := label? marker*
-    marker  := '@@' func ('__' arg)*     -> ActionCall
-             | '--' tag                  -> Tag
+segment := label? marker*
+marker  := '@@' func ('__' arg)*     -> ActionCall
+         | '--' tag                  -> Tag
 """
 
 import re
