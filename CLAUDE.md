@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-TagFileSystem is a per-root daemon: it watches a managed folder, keys every file in SQLite, parses tags and add-on functions out of names (`@@make_copy__.jpg__backup/2024--trip/img--raw.jpg`), runs user-written add-ons from `script/` on the files that ask for them, and records runs, traces, provenance and problems so a human, the `tfs` CLI or later an MCP client can query them. Python 3.12, managed with `uv` (src layout, `uv_build` backend). Every source file starts with `# Code by AkinoAlice@TyrantRey`.
+TagFileSystem is a per-root daemon: it watches a managed folder, keys every file in SQLite, parses tags and add-on functions out of names (`@@make_copy__.jpg__backup/2024--trip/img--raw.jpg`), runs user-written add-ons from `script/` on the files that ask for them, and records runs, traces, provenance and problems so a human, the `tfs` CLI or later an MCP client can query them. Python 3.12, managed with `uv` (src layout, `uv_build` backend). Every source file starts with `# Code by AkinoAlice@TyrantRey` except empty file.
 
 `DESIGN.md` is the approved v1 design (2026-08-30) and wins over this file for **target** behaviour; this file describes the code **as it is**. Read `DESIGN.md` before changing the name grammar, schema, configuration, CLI or run semantics; update both when behaviour changes. `README.md` is the user-facing short version.
 
@@ -22,6 +22,10 @@ uv run pytest -q                          # tests (~1 min; every test builds its
 - Every command takes `--root <dir>`; otherwise the root is discovered by walking up from CWD like git.
 - Linting/formatting is configured for Trunk (`.trunk/trunk.yaml`: ruff `B,D3,E,F` with `E501` ignored, black, isort profile=black, bandit, markdownlint, prettier). The `trunk` CLI is not installed on this machine.
 - Tests: `tests/helpers.py` has `fetch` / `metadata_of` / `tag_of` (assert-narrow `Optional` results so `ty check tests` stays clean). Tests that load add-ons carry a `clean_modules` fixture that drops `tfs_addons.*` from `sys.modules`. Daemon/CLI tests pick a free port and write it into the root's `config.toml`.
+
+## Versioning
+
+`version` in `pyproject.toml` is `A.B.C`: **A** = major update (breaks an existing root, the name grammar or the CLI), **B** = feature added (backwards compatible), **C** = changes update (fix, refactor, typo). A typo is a small change, so it is a C: `+0.0.1`. Bumping A resets B and C to `0`; bumping B resets C. Bump it in the same commit as the change it describes, and keep `README.md`'s Versioning section in step.
 
 ## Architecture (by layer, bottom up)
 

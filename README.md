@@ -123,11 +123,12 @@ the port; mount the root as a volume.
 ## Development
 
 ```bash
-uv run pytest -q              # tests (each test gets its own temporary root)
-uv run ty check src tests     # type check
+uv run pytest -q                # tests (each test gets its own temporary root)
+uv run ty check src tests       # type check
+uv run ruff format src tests    # format (CI runs it with --check)
 ```
 
-Both run in CI on every push and pull request
+All three run in CI on every push and pull request
 ([`.github/workflows/test.yml`](.github/workflows/test.yml)), on Linux and
 Windows against Python 3.12 and 3.13, followed by a smoke test that inits a
 root, starts the daemon, queries it and stops it.
@@ -135,3 +136,17 @@ root, starts the daemon, queries it and stops it.
 Linting/formatting is configured for [Trunk](https://trunk.io) (ruff, black,
 isort, bandit, markdownlint, prettier) in `.trunk/trunk.yaml`. Every source
 file starts with `# Code by AkinoAlice@TyrantRey`.
+
+## Versioning
+
+`version` in [`pyproject.toml`](pyproject.toml) is `A.B.C`:
+
+| Part | Bump it for | Example |
+| --- | --- | --- |
+| **A** — major | A major update — a change that breaks an existing root, the name grammar or the CLI | `1.4.2` → `2.0.0` |
+| **B** — feature | A feature added, backwards compatible | `1.4.2` → `1.5.0` |
+| **C** — change | A changes update: a fix, a refactor, a typo | `1.4.2` → `1.4.3` |
+
+A typo is a small change, so it is a C: `+0.0.1`. Bumping A resets B and C to
+`0`; bumping B resets C. Bump the version in the same commit as the change it
+describes.
