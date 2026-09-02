@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Binding of slug args to a handler's parameters (DESIGN.md §4.2).
+"""Binding of slug args to a handler's parameters (DESIGN/v0-1-0.md §4.2).
 
 A file handler is ``(path, metadata, ctx, *typed_args)``: the three fixed
 parameters come first, everything after them is an action argument. The
@@ -165,7 +165,7 @@ def parameters_of(func: Callable, fixed: int = FIXED_PARAMETERS) -> list[Paramet
                 )
             raise SignatureError(
                 f"{callable_name(func)}: {param.name} is annotated with a bare path type; "
-                f"use action.TagDir or action.Remote (DESIGN.md §4.4)"
+                f"use action.TagDir or action.Remote (DESIGN/v0-1-0.md §4.4)"
             )
         result.append(
             Parameter(

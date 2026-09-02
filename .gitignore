@@ -27,3 +27,4 @@ test.txt
 
 # CI smoke root (see .github/workflows/test.yml)
 ci-smoke-root/
+demo/

@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""The daemon's HTTP control channel and its client (DESIGN.md §8).
+"""The daemon's HTTP control channel and its client (DESIGN/v0-1-0.md §8).
 
 A small JSON-over-HTTP server bound to ``[daemon] bind:port``, every request
 authenticated with ``Authorization: Bearer <.tfs/token>``. It is the seed of

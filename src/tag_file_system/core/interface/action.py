@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Records of the action layer (DESIGN.md §6–§7): actions, runs, traces,
+"""Records of the action layer (DESIGN/v0-1-0.md §6–§7): actions, runs, traces,
 provenance edges and problems. Pure data; the ``ActionStore`` persists them.
 """
 
@@ -46,7 +46,7 @@ class RunSource(StrEnum):
 
 
 class Severity(StrEnum):
-    """P0..P3. Handlers subscribe to a level *and above* (DESIGN.md §6.4)."""
+    """P0..P3. Handlers subscribe to a level *and above* (DESIGN/v0-1-0.md §6.4)."""
 
     CRIT = "crit"
     ERR = "err"
@@ -140,7 +140,7 @@ class ActionRecord(BaseModel):
 
 
 class RunKey(BaseModel):
-    """Identity of a run (DESIGN.md §6.1): a run starts iff no row of any
+    """Identity of a run (DESIGN/v0-1-0.md §6.1): a run starts iff no row of any
     status has this key. Equality and hashing go through the canonical
     ``args_json``, so two keys are equal exactly when the store would match
     them."""
@@ -251,7 +251,7 @@ class TimelineEntry(BaseModel):
 
 
 class FileHistory(BaseModel):
-    """Everything that happened to one file, oldest first (DESIGN.md §7,
+    """Everything that happened to one file, oldest first (DESIGN/v0-1-0.md §7,
     "what happened to file X")."""
 
     file_id: str

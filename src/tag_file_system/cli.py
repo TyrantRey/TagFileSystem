@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""The ``tfs`` command (DESIGN.md §8): exactly six commands.
+"""The ``tfs`` command (DESIGN/v0-1-0.md §8): exactly six commands.
 
     tfs init [dir]      tfs list      tfs query -t a -t b ...
     tfs reload          tfs start [-d] [--force]      tfs stop

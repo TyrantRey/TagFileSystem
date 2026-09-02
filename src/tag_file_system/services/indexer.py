@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Indexing one file into the database (DESIGN.md §5).
+"""Indexing one file into the database (DESIGN/v0-1-0.md §5).
 
 Shared by the daemon (watcher events, reconciliation) and the runner
 (``ctx.emit`` outputs): stat the file, hash it unless ``(size, mtime_ns)``

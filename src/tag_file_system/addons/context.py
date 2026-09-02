@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""``ActionContext``: what a handler gets as ``ctx`` (DESIGN.md §4.5).
+"""``ActionContext``: what a handler gets as ``ctx`` (DESIGN/v0-1-0.md §4.5).
 
 The context is a thin facade; everything with side effects on the daemon
 goes through the ``Runtime`` protocol, which the runner implements. That
@@ -31,7 +31,7 @@ class RunHandle:
     """Mutable state of one in-flight run, owned by the runner."""
 
     run: RunRecord
-    depth: int = 0  # chain depth (DESIGN.md §4.5: > 8 stops)
+    depth: int = 0  # chain depth (DESIGN/v0-1-0.md §4.5: > 8 stops)
     started: float = field(default_factory=time.monotonic)
     threads: list[threading.Thread] = field(default_factory=list)
     spawned: bool = False  # once True the run ends on ctx.done()
@@ -94,7 +94,7 @@ class Runtime(Protocol):
 class ProblemContext:
     """``ctx`` for problem handlers: the daemon-facing helpers that make
     sense without a run of their own. Problems raised here are logged, never
-    re-dispatched (DESIGN.md §6.4)."""
+    re-dispatched (DESIGN/v0-1-0.md §6.4)."""
 
     def __init__(self, runtime: Runtime, problem: ProblemRecord) -> None:
         self._runtime = runtime

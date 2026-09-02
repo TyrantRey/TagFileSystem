@@ -38,7 +38,7 @@ def transactional(method: Callable) -> Callable:
     Commits on success, rolls back and re-raises on failure. Calls made while
     a transaction is already open (a transactional method calling another one)
     simply join the outer transaction. The backend's lock is held throughout,
-    so add-on threads can share the one connection (DESIGN.md §4.3).
+    so add-on threads can share the one connection (DESIGN/v0-1-0.md §4.3).
     """
 
     @wraps(method)
@@ -93,7 +93,7 @@ def _placeholders(count: int) -> str:
 
 class SQLiteBackend:
     """One connection, serialized behind an ``RLock``; paths are stored as
-    root-relative POSIX keys (DESIGN.md §7)."""
+    root-relative POSIX keys (DESIGN/v0-1-0.md §7)."""
 
     def __init__(self) -> None:
         self.logger = logger
