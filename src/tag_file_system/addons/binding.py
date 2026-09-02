@@ -25,6 +25,7 @@ from tag_file_system.action import PathArg
 
 FIXED_PARAMETERS = 3  # path, metadata, ctx
 PROBLEM_PARAMETERS = 2  # problem, ctx
+LIFECYCLE_PARAMETERS = 1  # ctx
 
 PathResolver = Callable[[str, str], Path]  # (kind, raw) -> resolved path
 

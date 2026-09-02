@@ -13,6 +13,12 @@
     @action.tagged("photos")
     def on_photo(path, metadata, ctx): ...
 
+    @action.on_start()
+    def up(ctx: ActionContext): ...
+
+    @action.on_stop()
+    def down(ctx: ActionContext): ...
+
     @action.err()
     def notify(problem: ProblemRecord, ctx: ActionContext): ...
 
@@ -36,8 +42,8 @@ F = TypeVar("F", bound=Callable)
 
 @dataclass(frozen=True)
 class HandlerSpec:
-    kind: Literal["file", "problem"]
-    hook: Hook | None = None  # file handlers
+    kind: Literal["file", "problem", "lifecycle"]
+    hook: Hook | None = None  # file and lifecycle handlers
     tag: str | None = None  # `tagged` handlers: the normalized tag name
     on_move: bool = False  # `removed`: also fire when the file leaves the @@ dir
     severity: Severity | None = None  # problem handlers: level and above
@@ -47,6 +53,8 @@ class HandlerSpec:
             assert self.severity is not None
             return self.severity.value
         assert self.hook is not None
+        if self.kind == "lifecycle":
+            return self.hook.value
         if self.hook is Hook.TAGGED:
             return f"tagged:{self.tag}"
         if self.hook is Hook.REMOVED and self.on_move:
@@ -114,6 +122,23 @@ def tagged(tag: str) -> Callable[[F], F]:
         raise TypeError(f"tagged() takes a tag name, got {tag!r}")
     name = Tag(name=tag).name  # normalized exactly like tags parsed from names
     return _file(Hook.TAGGED, tag=name)
+
+
+def _lifecycle(hook: Hook, bare: object) -> Callable[[F], F]:
+    _no_bare_use(bare, hook.value)
+    return _mark(HandlerSpec(kind="lifecycle", hook=hook))
+
+
+def on_start(_bare: object = None) -> Callable[[F], F]:
+    """The daemon is up: the add-ons are loaded, no file has been looked at
+    yet. Runs once per daemon session (DESIGN/v0-3-0.md §2); an add-on that
+    appears later runs it as soon as it is loaded."""
+    return _lifecycle(Hook.ON_START, _bare)
+
+
+def on_stop(_bare: object = None) -> Callable[[F], F]:
+    """The daemon is stopping, before in-flight runs are waited for."""
+    return _lifecycle(Hook.ON_STOP, _bare)
 
 
 def _problem(severity: Severity, bare: object) -> Callable[[F], F]:

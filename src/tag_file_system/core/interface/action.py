@@ -23,6 +23,14 @@ class Hook(StrEnum):
     MODIFIED = "modified"
     REMOVED = "removed"
     TAGGED = "tagged"
+    # The daemon itself, not a file (DESIGN/v0-3-0.md §2).
+    ON_START = "on_start"
+    ON_STOP = "on_stop"
+
+    @property
+    def is_lifecycle(self) -> bool:
+        """Whether the hook is about the daemon session rather than a file."""
+        return self in (Hook.ON_START, Hook.ON_STOP)
 
 
 class RunStatus(StrEnum):
@@ -43,6 +51,7 @@ class RunSource(StrEnum):
     RECONCILE = "reconcile"
     RETRY = "retry"
     CHAIN = "chain"
+    LIFECYCLE = "lifecycle"  # the daemon started or stopped
 
 
 class Severity(StrEnum):

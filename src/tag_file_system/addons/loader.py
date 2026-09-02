@@ -33,6 +33,7 @@ from typing import Any, Callable, ClassVar, Protocol, Sequence
 
 from tag_file_system.action import HandlerSpec, handlers_of
 from tag_file_system.addons.binding import (
+    LIFECYCLE_PARAMETERS,
     PROBLEM_PARAMETERS,
     SignatureError,
     callable_name,
@@ -93,6 +94,23 @@ class ProblemHandler:
         return callable_name(self.func)
 
 
+@dataclass(frozen=True)
+class LifecycleHandler:
+    """``@action.on_start`` / ``@action.on_stop``: called with ``(ctx)`` only —
+    there is no file (DESIGN/v0-3-0.md §2)."""
+
+    addon: "Addon"
+    func: Callable
+    hook: Hook
+
+    @property
+    def name(self) -> str:
+        return callable_name(self.func)
+
+
+NO_ARGUMENTS: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
+
+
 @dataclass
 class Addon:
     name: str
@@ -102,6 +120,7 @@ class Addon:
     module: types.ModuleType
     file_handlers: list[FileHandler] = field(default_factory=list)
     problem_handlers: list[ProblemHandler] = field(default_factory=list)
+    lifecycle_handlers: list[LifecycleHandler] = field(default_factory=list)
     record: ActionRecord | None = None
 
     @property
@@ -109,15 +128,37 @@ class Addon:
         seen: dict[Hook, None] = {}
         for handler in self.file_handlers:
             seen.setdefault(handler.hook)
+        for lifecycle in self.lifecycle_handlers:
+            seen.setdefault(lifecycle.hook)
         return list(seen)
 
     def handlers(self, hook: Hook) -> list[FileHandler]:
         return [h for h in self.file_handlers if h.hook is hook]
 
+    def lifecycle(self, hook: Hook) -> list[LifecycleHandler]:
+        return [h for h in self.lifecycle_handlers if h.hook is hook]
+
     @property
     def signature(self) -> dict[str, Any]:
         """Per-hook JSON Schema of the action arguments (``actions.signature_json``)."""
-        return {h.spec.describe(): h.schema for h in self.file_handlers}
+        return {
+            **{h.spec.describe(): h.schema for h in self.file_handlers},
+            **{h.hook.value: NO_ARGUMENTS for h in self.lifecycle_handlers},
+        }
+
+    def describe(self) -> dict[str, Any]:
+        """What ``tfs list`` and ``/actions`` report about this add-on."""
+        return {
+            "name": self.name,
+            "script": self.key.as_posix(),
+            "script_hash": self.script_hash,
+            "hooks": [
+                *(h.spec.describe() for h in self.file_handlers),
+                *(h.hook.value for h in self.lifecycle_handlers),
+            ],
+            "problem_hooks": [h.severity.value for h in self.problem_handlers],
+            "signature": self.signature,
+        }
 
 
 def script_hash(path: Path) -> str:
@@ -369,7 +410,9 @@ class AddonLoader:
             module=module,
         )
         signature_problems = self._collect(addon)
-        if not addon.file_handlers and not addon.problem_handlers:
+        if not (
+            addon.file_handlers or addon.problem_handlers or addon.lifecycle_handlers
+        ):
             if signature_problems and previous is not None:
                 # Every handler is broken: that is a failed reload.
                 self._restore(saved)
@@ -413,7 +456,8 @@ class AddonLoader:
             sys.modules[name] = module
         self.logger.info(
             f"Loaded add-on {name} ({len(addon.file_handlers)} file handler(s), "
-            f"{len(addon.problem_handlers)} problem handler(s))"
+            f"{len(addon.problem_handlers)} problem handler(s), "
+            f"{len(addon.lifecycle_handlers)} lifecycle handler(s))"
         )
         return addon
 
@@ -527,6 +571,31 @@ class AddonLoader:
                                 addon=addon, func=member, severity=spec.severity
                             )
                         )
+                    elif spec.kind == "lifecycle":
+                        assert spec.hook is not None
+                        extra = parameters_of(member, fixed=LIFECYCLE_PARAMETERS)
+                        required = [p.name for p in extra if p.required]
+                        if required:
+                            raise SignatureError(
+                                f"{callable_name(member)}: {spec.hook.value} handlers take (ctx); "
+                                f"{', '.join(required)} would never be supplied"
+                            )
+                        slot = (spec.hook, None)
+                        if slot in seen_slots:
+                            winner, describe = seen_slots[slot]
+                            self.report(
+                                Severity.ERR,
+                                "addon.duplicate_handler",
+                                f"{addon.path.name}: handler {callable_name(member)} "
+                                f"({spec.describe()}) skipped: {winner} already handles {describe}",
+                                action_name=addon.name,
+                            )
+                            skipped += 1
+                            continue
+                        seen_slots[slot] = (callable_name(member), spec.describe())
+                        addon.lifecycle_handlers.append(
+                            LifecycleHandler(addon=addon, func=member, hook=spec.hook)
+                        )
                     else:
                         assert spec.hook is not None
                         schema = signature_schema(member)  # SignatureError first
@@ -576,6 +645,13 @@ class AddonLoader:
             for addon in self.addons.values()
             for h in addon.file_handlers
             if h.hook is Hook.TAGGED and h.spec.tag == wanted
+        ]
+
+    def lifecycle_handlers(self, hook: Hook) -> list[LifecycleHandler]:
+        """Every loaded add-on's handler for ``on_start``/``on_stop``, by
+        add-on name so the order of a session does not depend on the disk."""
+        return [
+            h for name in sorted(self.addons) for h in self.addons[name].lifecycle(hook)
         ]
 
     def problem_handlers(self, severity: Severity) -> list[ProblemHandler]:
