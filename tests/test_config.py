@@ -10,7 +10,9 @@ from tag_file_system.config import Config, ConfigError, DaemonConfig, LoggingCon
 def test_defaults_match_design():
     config = Config()
 
-    assert config.logging == LoggingConfig(level="INFO", file=Path(".tfs/tag_file_system.log"))
+    assert config.logging == LoggingConfig(
+        level="INFO", file=Path(".tfs/tag_file_system.log")
+    )
     assert config.daemon == DaemonConfig(
         bind="127.0.0.1", port=7411, stop_timeout_seconds=30, run_warn_after_seconds=300
     )
@@ -102,7 +104,9 @@ def test_invalid_config_is_a_config_error(text: str):
 
 
 def test_numbers_of_the_right_type_are_accepted():
-    config = Config.loads("[daemon]\nport = 80\nstop_timeout_seconds = 30\nrun_warn_after_seconds = 2.5\n")
+    config = Config.loads(
+        "[daemon]\nport = 80\nstop_timeout_seconds = 30\nrun_warn_after_seconds = 2.5\n"
+    )
 
     assert config.daemon.port == 80
     assert config.daemon.stop_timeout_seconds == 30.0

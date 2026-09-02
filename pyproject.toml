@@ -1,24 +1,20 @@
 [project]
 name = "tag_file_system"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tags and add-on functions driven by file names, with a queryable SQLite log"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
-  "pydantic>=2.12.5",
-  "typer>=0.21.1",
-  "watchfiles>=1.1.1",
-]
+dependencies = ["pydantic>=2.12.5", "typer>=0.21.1", "watchfiles>=1.1.1"]
 
 [project.scripts]
 tfs = "tag_file_system.cli:app"
 
 [dependency-groups]
-dev = [
-    "pytest>=9.1.1",
-    "ty>=0.0.15",
-]
+dev = ["pytest>=9.1.1", "ruff>=0.15.10", "ty>=0.0.15"]
 
 [build-system]
 requires = ["uv_build>=0.10.7"]
 build-backend = "uv_build"
+
+[tool.ruff.lint]
+ignore = []

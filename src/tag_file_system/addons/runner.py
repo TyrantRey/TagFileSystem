@@ -27,7 +27,12 @@ import traceback
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, ClassVar
 
-from tag_file_system.addons.binding import BindingError, SignatureError, bind, raw_by_name
+from tag_file_system.addons.binding import (
+    BindingError,
+    SignatureError,
+    bind,
+    raw_by_name,
+)
 from tag_file_system.addons.context import ActionContext, ProblemContext, RunHandle
 from tag_file_system.addons.loader import AddonLoader, FileHandler
 from tag_file_system.config import Config
@@ -47,7 +52,11 @@ from tag_file_system.core.interface.database import OperationResultEnum
 from tag_file_system.core.interface.file_metadata import TaggedFile
 from tag_file_system.core.interface.tag import ActionCall, ParsedPath, normalize_tag
 from tag_file_system.core.logger import logger
-from tag_file_system.database.action_store import ActionStore, RunAlreadyFinal, RunExists
+from tag_file_system.database.action_store import (
+    ActionStore,
+    RunAlreadyFinal,
+    RunExists,
+)
 from tag_file_system.database.sqlite import SQLiteBackend
 from tag_file_system.root import TFS_DIR, SCRIPT_DIR, OutsideRoot, Root, Zone
 from tag_file_system.services.indexer import Indexer
@@ -189,7 +198,9 @@ class ActionRunner:
         leaving the directory rather than being deleted."""
         hook = Hook(hook)
         self._report_parse_problems(parsed, path)
-        if parent is not None and not self._chain_allowed(parent, f"@@ functions of {self._key_text(path)}", path):
+        if parent is not None and not self._chain_allowed(
+            parent, f"@@ functions of {self._key_text(path)}", path
+        ):
             return []
         runs: list[RunRecord] = []
         for call in parsed.actions:
@@ -231,7 +242,9 @@ class ActionRunner:
     ) -> list[RunRecord]:
         """Run every ``@action.tagged(tag)`` handler for ``path``."""
         tag = normalize_tag(tag)
-        if parent is not None and not self._chain_allowed(parent, f"tag {tag!r} on {self._key_text(path)}", path):
+        if parent is not None and not self._chain_allowed(
+            parent, f"tag {tag!r} on {self._key_text(path)}", path
+        ):
             return []
         runs: list[RunRecord] = []
         for handler in self.loader.tag_handlers(tag):
@@ -265,7 +278,10 @@ class ActionRunner:
     def retry(self, run_id: str) -> RunRecord | None:
         """Start a fresh run for a failed/interrupted run (DESIGN §4.5)."""
         previous = self.store.get_run(run_id)
-        if previous is None or previous.status not in (RunStatus.FAILED, RunStatus.INTERRUPTED):
+        if previous is None or previous.status not in (
+            RunStatus.FAILED,
+            RunStatus.INTERRUPTED,
+        ):
             return None
         if self._retry_depth(previous) >= MAX_RETRIES:
             self.problem(
@@ -415,17 +431,25 @@ class ActionRunner:
         # The key first: it needs no resolver, and most events find their
         # run already there (DESIGN §6.1).
         try:
-            args = key_args if key_args is not None else raw_by_name(handler.func, raw_args)
+            args = (
+                key_args
+                if key_args is not None
+                else raw_by_name(handler.func, raw_args)
+            )
         except SignatureError as e:
             args = {"_args": list(raw_args)}
             binding_failure: BindingError | None = BindingError(str(e))
         else:
             binding_failure = None
-        key = RunKey(file_hash=file.file_hash, action_name=addon.name, hook=hook, args=args)
+        key = RunKey(
+            file_hash=file.file_hash, action_name=addon.name, hook=hook, args=args
+        )
         if retry_of is None:
             if self.store.find_run(key) is not None:
                 return None
-            if hook in (Hook.ADDED, Hook.MODIFIED) and self._produced_by(path, addon.name):
+            if hook in (Hook.ADDED, Hook.MODIFIED) and self._produced_by(
+                path, addon.name
+            ):
                 return None  # a generated file never re-triggers its producer
 
         if binding_failure is None:
@@ -436,8 +460,13 @@ class ActionRunner:
         if binding_failure is not None:
             try:
                 run = self.store.start_run(
-                    record, key, slug, path, source,
-                    parent_run_id=parent.id if parent else None, retry_of=retry_of,
+                    record,
+                    key,
+                    slug,
+                    path,
+                    source,
+                    parent_run_id=parent.id if parent else None,
+                    retry_of=retry_of,
                 )
             except RunExists:
                 return None
@@ -456,8 +485,13 @@ class ActionRunner:
 
         try:
             run = self.store.start_run(
-                record, key, slug, path, source,
-                parent_run_id=parent.id if parent else None, retry_of=retry_of,
+                record,
+                key,
+                slug,
+                path,
+                source,
+                parent_run_id=parent.id if parent else None,
+                retry_of=retry_of,
             )
         except RunExists:
             return None
@@ -473,9 +507,13 @@ class ActionRunner:
         try:
             result = handler.func(abs_path, file.metadata, ctx, **bound.kwargs)
         except KeyboardInterrupt:
-            self._finish(handle, RunStatus.INTERRUPTED, error="interrupted by the operator")
+            self._finish(
+                handle, RunStatus.INTERRUPTED, error="interrupted by the operator"
+            )
             raise
-        except BaseException as e:  # SystemExit included: an add-on must not stop the daemon
+        except (
+            BaseException
+        ) as e:  # SystemExit included: an add-on must not stop the daemon
             error = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             return self._finish(handle, RunStatus.FAILED, error=error) or handle.run
         finally:
@@ -614,8 +652,12 @@ class ActionRunner:
         }[severity]
         self.logger.log(level, f"[{severity}] {kind}: {message}")
         record = self.store.record_problem(
-            severity, kind, message,
-            action_name=action_name, file_path=self._key_or_none(file_path), run_id=run_id,
+            severity,
+            kind,
+            message,
+            action_name=action_name,
+            file_path=self._key_or_none(file_path),
+            run_id=run_id,
         )
         if getattr(self._dispatching, "active", False):
             self._dispatching.queue.append(record)
@@ -667,17 +709,27 @@ class ActionRunner:
         key = self._key_or_none(path)
         if indexed is None or key is None:
             reason = "outside the root" if key is None else "not a data file"
-            self.trace(handle, TraceKind.EMIT, {"path": key or str(path), "indexed": False, "reason": reason})
+            self.trace(
+                handle,
+                TraceKind.EMIT,
+                {"path": key or str(path), "indexed": False, "reason": reason},
+            )
             return
         self.store.add_provenance(key, handle.id, ProvenanceKind.EMITTED)
         self.trace(handle, TraceKind.EMIT, {"path": key})
         abs_path = self._abs(path)
         for tag in indexed.new_tags:
-            self.on_tag(abs_path, indexed.file, tag, source=RunSource.CHAIN, parent=handle)
+            self.on_tag(
+                abs_path, indexed.file, tag, source=RunSource.CHAIN, parent=handle
+            )
         if indexed.parsed.actions:
             self.on_file(
-                Hook.ADDED, abs_path, indexed.file, indexed.parsed,
-                source=RunSource.CHAIN, parent=handle,
+                Hook.ADDED,
+                abs_path,
+                indexed.file,
+                indexed.parsed,
+                source=RunSource.CHAIN,
+                parent=handle,
             )
 
     def moved(self, handle: RunHandle, src: Path, dst: Path) -> None:
@@ -685,7 +737,10 @@ class ActionRunner:
         if old_key is not None and self.backend.query_file(old_key) is not None:
             renamed = False
             if new_key is not None:
-                renamed = self.backend.modify(old_key, new_key).status is OperationResultEnum.SUCCESS
+                renamed = (
+                    self.backend.modify(old_key, new_key).status
+                    is OperationResultEnum.SUCCESS
+                )
             if not renamed:
                 # Moved outside the root, or onto a file that already has a
                 # row: the source is gone either way.
@@ -714,21 +769,29 @@ class ActionRunner:
         else:
             wanted = [t for t in current if t not in set(names)]
         self.backend.set_file_tags(path, wanted)
-        self.trace(handle, TraceKind.RECORD, {"tags": wanted, "path": self._key_text(path)})
+        self.trace(
+            handle, TraceKind.RECORD, {"tags": wanted, "path": self._key_text(path)}
+        )
         if add:
             fresh = self.backend.query_file(path)
             for name in names:
                 if name not in current and fresh is not None:
-                    self.on_tag(path, fresh, name, source=RunSource.CHAIN, parent=handle)
+                    self.on_tag(
+                        path, fresh, name, source=RunSource.CHAIN, parent=handle
+                    )
 
     def resolve(self, kind: str, raw: str) -> Path:
         if kind == "remote":
             target = self.config.remotes.get(raw)
             if target is None:
-                raise LookupError(f"unknown remote {raw!r} (add it to [remotes] in config.toml)")
+                raise LookupError(
+                    f"unknown remote {raw!r} (add it to [remotes] in config.toml)"
+                )
             resolved = Path(target)
             if not resolved.is_absolute():
-                raise LookupError(f"remote {raw!r} = {target!r} is not an absolute path on this host")
+                raise LookupError(
+                    f"remote {raw!r} = {target!r} is not an absolute path on this host"
+                )
             return resolved
         if kind == "tagdir":
             tag = normalize_tag(raw)
@@ -760,11 +823,17 @@ class ActionRunner:
                 )
                 # A thread that dies without ctx.done() would leave the run
                 # open until shutdown: that is a failed run.
-                self._finish(handle, RunStatus.FAILED, error=f"thread failed: {message}\n{traceback.format_exc()}")
+                self._finish(
+                    handle,
+                    RunStatus.FAILED,
+                    error=f"thread failed: {message}\n{traceback.format_exc()}",
+                )
             finally:
                 _pop()
 
-        thread = threading.Thread(target=target, name=f"tfs-run-{handle.id[:8]}", daemon=True)
+        thread = threading.Thread(
+            target=target, name=f"tfs-run-{handle.id[:8]}", daemon=True
+        )
         handle.spawned = True
         handle.threads.append(thread)
         thread.start()
@@ -835,7 +904,8 @@ class ActionRunner:
         found: list[Path] = []
         for current, dirs, _files in os.walk(self.root.path):
             dirs[:] = [
-                d for d in dirs
+                d
+                for d in dirs
                 if not (Path(current) == self.root.path and d in (TFS_DIR, SCRIPT_DIR))
             ]
             for name in dirs:

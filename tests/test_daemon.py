@@ -6,7 +6,7 @@ import socket
 import sys
 import textwrap
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 import pytest
 from watchfiles import Change
@@ -53,9 +53,9 @@ def clean_modules():
 @pytest.fixture
 def root(tmp_path: Path) -> Root:
     root = Root.init(tmp_path / "vault")
-    Config(daemon=DaemonConfig(run_warn_after_seconds=0.05, stop_timeout_seconds=0.2)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(run_warn_after_seconds=0.05, stop_timeout_seconds=0.2)
+    ).write(root.config_path)
     (root.script_dir / "copy.py").write_text(textwrap.dedent(COPY), encoding="utf-8")
     return root
 
@@ -110,7 +110,9 @@ def test_startup_locks_loads_and_reconciles(root: Root, daemon: Daemon):
     assert len(daemon.store.query_runs()) == len(runs)
 
 
-def test_startup_refuses_when_locked_and_recovers_interrupted_runs(root: Root, tmp_path: Path):
+def test_startup_refuses_when_locked_and_recovers_interrupted_runs(
+    root: Root, tmp_path: Path
+):
     other = Daemon(root)
     other.startup()
     # simulate a crash: a run left running, lock left behind by a dead pid
@@ -118,7 +120,11 @@ def test_startup_refuses_when_locked_and_recovers_interrupted_runs(root: Root, t
     from tag_file_system.core.interface.action import RunKey
 
     stuck = other.store.start_run(
-        action, RunKey(file_hash="x", action_name="copy", hook=Hook.ADDED), "copy", None, RunSource.WATCH
+        action,
+        RunKey(file_hash="x", action_name="copy", hook=Hook.ADDED),
+        "copy",
+        None,
+        RunSource.WATCH,
     )
     other.backend.close()  # not shutdown(): the lock stays
 
@@ -186,7 +192,9 @@ def test_file_lifecycle_through_events(root: Root, daemon: Daemon):
     assert daemon.backend.query_file(path, include_deleted=True) is not None
 
 
-def test_move_keeps_identity_and_fires_only_on_move_handlers(root: Root, daemon: Daemon):
+def test_move_keeps_identity_and_fires_only_on_move_handlers(
+    root: Root, daemon: Daemon
+):
     daemon.startup()
     old = write(root, "@@copy/a.txt", "same")
     daemon.process_changes(added(old))
@@ -204,9 +212,12 @@ def test_move_keeps_identity_and_fires_only_on_move_handlers(root: Root, daemon:
     assert daemon.backend.query_file(old, include_deleted=True) is None
     assert calls(daemon)[-1] == ("removed", "a.txt")  # left the @@copy dir
     assert len(daemon.store.query_runs()) == runs_before + 1  # only the removed run
-    assert daemon.backend.connection.execute(
-        "SELECT COUNT(*) FROM events WHERE name = 'file.move'"
-    ).fetchone()[0] == 1
+    assert (
+        daemon.backend.connection.execute(
+            "SELECT COUNT(*) FROM events WHERE name = 'file.move'"
+        ).fetchone()[0]
+        == 1
+    )
 
 
 def test_directory_rename_rescans_the_subtree(root: Root, daemon: Daemon):
@@ -220,7 +231,9 @@ def test_directory_rename_rescans_the_subtree(root: Root, daemon: Daemon):
     new_dir = root.absolute("@@copy/2024--trip--hot")
     new_dir.parent.mkdir()
     old_dir.rename(new_dir)
-    daemon.process_changes({(Change.deleted, str(old_dir)), (Change.added, str(new_dir))})
+    daemon.process_changes(
+        {(Change.deleted, str(old_dir)), (Change.added, str(new_dir))}
+    )
 
     assert daemon.backend.query_file(a) is None
     moved = daemon.backend.query_file(new_dir / "a.txt")
@@ -236,7 +249,10 @@ def test_reconcile_is_idempotent_and_notices_missing_files(root: Root, daemon: D
     b = write(root, "keep/b--hot.txt", "B")
 
     first = daemon.reconcile()
-    assert {i.file.path.as_posix() for i in first.indexed} >= {"@@copy/a.txt", "keep/b--hot.txt"}
+    assert {i.file.path.as_posix() for i in first.indexed} >= {
+        "@@copy/a.txt",
+        "keep/b--hot.txt",
+    }
     assert first.hashed >= 2
     runs = len(daemon.store.query_runs())
 
@@ -262,11 +278,17 @@ def test_tfs_changes_are_ignored_and_scripts_hot_reload(root: Root, daemon: Daem
     assert len(daemon.backend.query_files(include_deleted=True)) == rows
 
     script = root.script_dir / "copy.py"
-    script.write_text(textwrap.dedent(COPY).replace('return path.name', 'return "v2"'), encoding="utf-8")
+    script.write_text(
+        textwrap.dedent(COPY).replace("return path.name", 'return "v2"'),
+        encoding="utf-8",
+    )
     daemon.process_changes({(Change.modified, str(script))})
     path = write(root, "@@copy/n.txt", "n")
     daemon.process_changes(added(path))
-    assert daemon.store.query_runs(action_name="copy", status=RunStatus.OK)[0].result == "v2"
+    assert (
+        daemon.store.query_runs(action_name="copy", status=RunStatus.OK)[0].result
+        == "v2"
+    )
 
     helper = root.script_dir / "_h.py"
     helper.write_text("V = 1\n")
@@ -308,7 +330,9 @@ def test_observed_changes_are_attributed_to_in_flight_runs(root: Root, daemon: D
     daemon.process_changes(added(stray))
 
     edges = daemon.store.query_provenance(file_path=stray)
-    assert [(e.run_id, e.kind.value, e.ambiguous) for e in edges] == [(run.id, "observed", False)]
+    assert [(e.run_id, e.kind.value, e.ambiguous) for e in edges] == [
+        (run.id, "observed", False)
+    ]
     assert problems(daemon, "observed")
     time.sleep(0.1)
     daemon.tick()
@@ -329,7 +353,9 @@ def test_observed_changes_are_attributed_to_in_flight_runs(root: Root, daemon: D
     assert status() is RunStatus.OK
 
 
-def test_unreadable_file_is_a_problem_not_a_crash(root: Root, daemon: Daemon, monkeypatch: pytest.MonkeyPatch):
+def test_unreadable_file_is_a_problem_not_a_crash(
+    root: Root, daemon: Daemon, monkeypatch: pytest.MonkeyPatch
+):
     daemon.startup()
     busy = write(root, "@@copy/busy.txt", "b")
     other = write(root, "@@copy/other.txt", "o")
@@ -435,7 +461,9 @@ def test_move_onto_a_soft_deleted_row(root: Root, daemon: Daemon):
 
     assert daemon.backend.query_file(b) is None
     assert daemon.backend.query_file(a) is not None
-    assert [r.path.as_posix() for r in daemon.backend.query_files(path_prefix="p")] == ["p/a.txt"]
+    assert [r.path.as_posix() for r in daemon.backend.query_files(path_prefix="p")] == [
+        "p/a.txt"
+    ]
 
 
 def test_startup_twice_is_refused(root: Root, daemon: Daemon):
@@ -500,7 +528,9 @@ def test_the_lock_records_the_control_port(root: Root, tmp_path: Path):
     with socket_module.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    Config(daemon=DaemonConfig(port=port, stop_timeout_seconds=0.5)).write(root.config_path)
+    Config(daemon=DaemonConfig(port=port, stop_timeout_seconds=0.5)).write(
+        root.config_path
+    )
     daemon = Daemon(root, control=True)
     daemon.startup()
     try:
@@ -518,7 +548,9 @@ def test_the_lock_records_the_control_port(root: Root, tmp_path: Path):
         plain.shutdown()
 
 
-def test_edits_and_deletions_are_observed_while_a_run_is_in_flight(root: Root, daemon: Daemon):
+def test_edits_and_deletions_are_observed_while_a_run_is_in_flight(
+    root: Root, daemon: Daemon
+):
     (root.script_dir / "bg.py").write_text(
         "import threading\nfrom tag_file_system import action\ngate = threading.Event()\n"
         "@action.added()\ndef run(p, m, c):\n    c.write(c.root / 'out' / 'g.txt', 'g')\n"
@@ -539,7 +571,9 @@ def test_edits_and_deletions_are_observed_while_a_run_is_in_flight(root: Root, d
 
     kinds = {p.kind.value for p in daemon.store.query_provenance(file_path=emitted)}
     assert kinds == {"emitted"}  # the emitter never observes its own output
-    deleted_edges = daemon.store.query_provenance(file_path=victim, include_deleted=True)
+    deleted_edges = daemon.store.query_provenance(
+        file_path=victim, include_deleted=True
+    )
     assert [(e.run_id, e.kind.value) for e in deleted_edges] == [(run.id, "observed")]
     daemon.loader.addon_for("bg").module.gate.set()  # type: ignore[union-attr]
 
@@ -561,7 +595,9 @@ def test_reconcile_matches_moves_by_hash(root: Root, daemon: Daemon):
     assert len(daemon.store.query_runs()) == runs_before + 1
 
 
-def test_batch_failure_is_reported_and_the_loop_survives(root: Root, monkeypatch: pytest.MonkeyPatch):
+def test_batch_failure_is_reported_and_the_loop_survives(
+    root: Root, monkeypatch: pytest.MonkeyPatch
+):
     import threading
 
     daemon = Daemon(root, poll_ms=50)
@@ -611,8 +647,12 @@ def test_shutdown_interrupts_and_releases(root: Root):
     backend = SQLiteBackend()
     backend.init_database(root.db_path, root_dir=root.path)
     store = ActionStore(backend)
-    assert [r.status for r in store.query_runs(action_name="stuck")] == [RunStatus.INTERRUPTED]
-    assert [p.severity for p in store.query_problems() if p.kind == "run.interrupted"] == [Severity.CRIT]
+    assert [r.status for r in store.query_runs(action_name="stuck")] == [
+        RunStatus.INTERRUPTED
+    ]
+    assert [
+        p.severity for p in store.query_problems() if p.kind == "run.interrupted"
+    ] == [Severity.CRIT]
     backend.close()
 
 

@@ -30,7 +30,12 @@ def test_decorators_mark_functions_without_wrapping():
     assert run(None, None, None) == "called"
     specs = action.handlers_of(run)
     # listed top-down, as written in the source
-    assert [s.describe() for s in specs] == ["added", "modified", "removed+move", "tagged:photos"]
+    assert [s.describe() for s in specs] == [
+        "added",
+        "modified",
+        "removed+move",
+        "tagged:photos",
+    ]
     assert specs[3].tag == "photos"  # normalized like a parsed tag
     assert specs[3].hook is Hook.TAGGED
     assert action.handlers_of(lambda: None) == []
@@ -42,9 +47,17 @@ def test_problem_decorators():
 
     (spec,) = action.handlers_of(notify)
     assert spec.kind == "problem" and spec.severity is Severity.WARN
-    assert action.handlers_of(action.crit()(lambda p, c: None))[0].severity is Severity.CRIT
-    assert action.handlers_of(action.err()(lambda p, c: None))[0].severity is Severity.ERR
-    assert action.handlers_of(action.info()(lambda p, c: None))[0].severity is Severity.INFO
+    assert (
+        action.handlers_of(action.crit()(lambda p, c: None))[0].severity
+        is Severity.CRIT
+    )
+    assert (
+        action.handlers_of(action.err()(lambda p, c: None))[0].severity is Severity.ERR
+    )
+    assert (
+        action.handlers_of(action.info()(lambda p, c: None))[0].severity
+        is Severity.INFO
+    )
 
 
 def test_tagged_rejects_invalid_tags():
@@ -103,7 +116,15 @@ def resolver(kind: str, raw: str) -> Path:
 
 
 def test_bind_coerces_and_keeps_raw_strings():
-    def run(path, metadata, ctx, width: int, ratio: float, dst: action.Remote, flag: bool = False): ...
+    def run(
+        path,
+        metadata,
+        ctx,
+        width: int,
+        ratio: float,
+        dst: action.Remote,
+        flag: bool = False,
+    ): ...
 
     bound = bind(run, ("800", "1.5", "photos"), resolver)
 
@@ -201,14 +222,20 @@ def test_path_marker_survives_optional_and_annotated_metadata():
     from pydantic import Field
 
     def run(
-        p, m, c,
+        p,
+        m,
+        c,
         a: action.TagDir | None = None,
         b: Optional[action.Remote] = None,
         n: Annotated[int, Field(gt=0)] = 1,
     ): ...
 
     params = parameters_of(run)
-    assert [(x.name, x.path_kind) for x in params] == [("a", "tagdir"), ("b", "remote"), ("n", None)]
+    assert [(x.name, x.path_kind) for x in params] == [
+        ("a", "tagdir"),
+        ("b", "remote"),
+        ("n", None),
+    ]
     bound = bind(run, ("x", "y", "3"), resolver)
     assert bound.kwargs == {
         "a": Path("/resolved/tagdir/x"),
@@ -260,7 +287,9 @@ def test_string_annotations_resolve_or_fail_loudly():
 
 
 def test_literal_members_are_coerced_by_their_own_type():
-    def run(p, m, c, size: Literal[800, 1600], mode: Literal["fast", "slow"] = "fast"): ...
+    def run(
+        p, m, c, size: Literal[800, 1600], mode: Literal["fast", "slow"] = "fast"
+    ): ...
 
     assert bind(run, ("800",)).kwargs == {"size": 800, "mode": "fast"}
     with pytest.raises(BindingError):
@@ -336,7 +365,9 @@ def test_resolver_failures_of_any_kind_are_binding_errors():
 
 
 def test_signature_schema_is_json_schema_with_path_markers():
-    def run(path, metadata, ctx, width: int, dst: action.Remote, mode: str = "fast"): ...
+    def run(
+        path, metadata, ctx, width: int, dst: action.Remote, mode: str = "fast"
+    ): ...
 
     schema = signature_schema(run)
 

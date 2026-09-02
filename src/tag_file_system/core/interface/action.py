@@ -264,9 +264,18 @@ class FileHistory(BaseModel):
     def timeline(self) -> list[TimelineEntry]:
         """All four lists merged, oldest first."""
         entries = [
-            *(TimelineEntry(at=e.occurred_at, kind="event", record=e) for e in self.events),
+            *(
+                TimelineEntry(at=e.occurred_at, kind="event", record=e)
+                for e in self.events
+            ),
             *(TimelineEntry(at=r.started_at, kind="run", record=r) for r in self.runs),
-            *(TimelineEntry(at=p.created_at, kind="provenance", record=p) for p in self.provenance),
-            *(TimelineEntry(at=p.occurred_at, kind="problem", record=p) for p in self.problems),
+            *(
+                TimelineEntry(at=p.created_at, kind="provenance", record=p)
+                for p in self.provenance
+            ),
+            *(
+                TimelineEntry(at=p.occurred_at, kind="problem", record=p)
+                for p in self.problems
+            ),
         ]
         return sorted(entries, key=lambda entry: entry.at)

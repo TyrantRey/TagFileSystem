@@ -45,6 +45,9 @@ jobs:
       - name: Install the project
         run: uv sync --locked # fails if uv.lock and pyproject.toml disagree
 
+      - name: Format check
+        run: uv run ruff format --check src tests
+
       - name: Type check
         run: uv run ty check src tests
 

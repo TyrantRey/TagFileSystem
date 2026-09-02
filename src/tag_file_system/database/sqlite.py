@@ -694,7 +694,8 @@ class SQLiteBackend:
             clauses.append("f.path LIKE ? ESCAPE '\\'")
             prefix = self.key(path_prefix) + "/"
             params.append(
-                prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                + "%"
             )
         if filename:
             clauses.append("f.filename LIKE ? ESCAPE '\\'")
@@ -715,7 +716,12 @@ class SQLiteBackend:
             if mime_type.endswith("/*"):
                 # a family: image/* matches image/jpeg, image/png, ...
                 clauses.append("f.mime_type LIKE ? ESCAPE '\\'")
-                family = mime_type[:-1].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                family = (
+                    mime_type[:-1]
+                    .replace("\\", "\\\\")
+                    .replace("%", "\\%")
+                    .replace("_", "\\_")
+                )
                 params.append(family + "%")
             else:
                 clauses.append("f.mime_type = ?")

@@ -41,7 +41,9 @@ class Indexed:
 
 
 class Indexer:
-    def __init__(self, root: Root, backend: SQLiteBackend, parser: TaggingParser | None = None) -> None:
+    def __init__(
+        self, root: Root, backend: SQLiteBackend, parser: TaggingParser | None = None
+    ) -> None:
         self.root = root
         self.backend = backend
         self.parser = parser if parser is not None else TaggingParser()
@@ -101,11 +103,19 @@ class Indexer:
         # its name spelled) survive a re-index.
         extra: list[str] = []
         if previous is not None and previous.status != "deleted":
-            old_key = PurePosixPath(previous_key) if previous_key is not None else previous.path
+            old_key = (
+                PurePosixPath(previous_key)
+                if previous_key is not None
+                else previous.path
+            )
             spelled = set(self.parser.parse_path(old_key).tag_names)
             extra = [t.name for t in previous.tags if t.name not in spelled]
         self.backend.set_file_tags(key, [*parsed.tag_names, *extra])
         file = self.backend.query_file(key)
         assert file is not None
-        active_previous = previous if previous is not None and previous.status != "deleted" else None
-        return Indexed(file=file, parsed=parsed, previous=active_previous, hashed=not reuse)
+        active_previous = (
+            previous if previous is not None and previous.status != "deleted" else None
+        )
+        return Indexed(
+            file=file, parsed=parsed, previous=active_previous, hashed=not reuse
+        )

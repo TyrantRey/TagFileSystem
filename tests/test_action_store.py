@@ -18,7 +18,11 @@ from tag_file_system.core.interface.action import (
     TraceKind,
     canonical_json,
 )
-from tag_file_system.database.action_store import ActionStore, RunAlreadyFinal, RunExists
+from tag_file_system.database.action_store import (
+    ActionStore,
+    RunAlreadyFinal,
+    RunExists,
+)
 from tag_file_system.database.sqlite import SQLiteBackend
 
 
@@ -40,14 +44,19 @@ def action(store: ActionStore) -> ActionRecord:
 
 def add_file(backend: SQLiteBackend, key: str, file_hash: str = "h") -> str:
     result = backend.insert(
-        filename=PurePosixPath(key).name, file_path=key, file_hash=file_hash, file_size=1
+        filename=PurePosixPath(key).name,
+        file_path=key,
+        file_hash=file_hash,
+        file_size=1,
     )
     assert result.record_id is not None
     return result.record_id
 
 
 def key_for(file_hash: str = "h", **args) -> RunKey:
-    return RunKey(file_hash=file_hash, action_name="make_copy", hook=Hook.ADDED, args=args)
+    return RunKey(
+        file_hash=file_hash, action_name="make_copy", hook=Hook.ADDED, args=args
+    )
 
 
 # ---------------------------------------------------------------- severity
@@ -65,7 +74,9 @@ def test_severity_levels_cover_themselves_and_above():
 # ----------------------------------------------------------------- actions
 
 
-def test_register_action_upserts_by_name_and_hash(store: ActionStore, action: ActionRecord):
+def test_register_action_upserts_by_name_and_hash(
+    store: ActionStore, action: ActionRecord
+):
     assert action.name == "make_copy"
     assert action.script_path == PurePosixPath("script/make_copy.py")
     assert action.hooks == [Hook.ADDED, Hook.REMOVED]
@@ -92,13 +103,18 @@ def test_register_action_upserts_by_name_and_hash(store: ActionStore, action: Ac
 # -------------------------------------------------------------------- runs
 
 
-def test_run_lifecycle(store: ActionStore, action: ActionRecord, backend: SQLiteBackend):
+def test_run_lifecycle(
+    store: ActionStore, action: ActionRecord, backend: SQLiteBackend
+):
     file_id = add_file(backend, "@@make_copy__.jpg/a.jpg")
     key = key_for(suffix=".jpg", dst="photos")
 
     assert store.find_run(key) is None
     run = store.start_run(
-        action, key, slug="make_copy__.jpg__photos", file_path="@@make_copy__.jpg/a.jpg",
+        action,
+        key,
+        slug="make_copy__.jpg__photos",
+        file_path="@@make_copy__.jpg/a.jpg",
         source=RunSource.WATCH,
     )
 
@@ -123,13 +139,19 @@ def test_run_lifecycle(store: ActionStore, action: ActionRecord, backend: SQLite
 
 
 def test_run_key_is_canonical_and_hook_aware(store: ActionStore, action: ActionRecord):
-    a = RunKey(file_hash="h", action_name="make_copy", hook=Hook.ADDED, args={"x": 1, "y": 2})
-    b = RunKey(file_hash="h", action_name="make_copy", hook=Hook.ADDED, args={"y": 2, "x": 1})
+    a = RunKey(
+        file_hash="h", action_name="make_copy", hook=Hook.ADDED, args={"x": 1, "y": 2}
+    )
+    b = RunKey(
+        file_hash="h", action_name="make_copy", hook=Hook.ADDED, args={"y": 2, "x": 1}
+    )
     assert a.args_json == b.args_json == '{"x":1,"y":2}'
 
     store.start_run(action, a, "make_copy__1__2", None, RunSource.RECONCILE)
     assert store.find_run(b) is not None
-    removed = RunKey(file_hash="h", action_name="make_copy", hook=Hook.REMOVED, args={"x": 1, "y": 2})
+    removed = RunKey(
+        file_hash="h", action_name="make_copy", hook=Hook.REMOVED, args={"x": 1, "y": 2}
+    )
     assert store.find_run(removed) is None  # same hash+args, different hook
 
 
@@ -151,22 +173,36 @@ def test_failed_and_retried_runs(store: ActionStore, action: ActionRecord):
     assert retry.retry_of == first.id
     assert store.find_run(key) == retry  # newest wins
     with pytest.raises(RunExists):  # the retry is running: no second retry yet
-        store.start_run(action, key, "make_copy", None, RunSource.RETRY, retry_of=first.id)
+        store.start_run(
+            action, key, "make_copy", None, RunSource.RETRY, retry_of=first.id
+        )
 
     chained = store.start_run(
-        action, key_for(file_hash="child"), "make_copy", None, RunSource.CHAIN,
+        action,
+        key_for(file_hash="child"),
+        "make_copy",
+        None,
+        RunSource.CHAIN,
         parent_run_id=retry.id,
     )
     assert chained.parent_run_id == retry.id
 
     with pytest.raises(ValueError):  # retry_of must share the key
-        store.start_run(action, key_for("other"), "x", None, RunSource.RETRY, retry_of=first.id)
+        store.start_run(
+            action, key_for("other"), "x", None, RunSource.RETRY, retry_of=first.id
+        )
     with pytest.raises(KeyError):
-        store.start_run(action, key_for("o2"), "x", None, RunSource.RETRY, retry_of="nope")
+        store.start_run(
+            action, key_for("o2"), "x", None, RunSource.RETRY, retry_of="nope"
+        )
     with pytest.raises(KeyError):
-        store.start_run(action, key_for("o3"), "x", None, RunSource.CHAIN, parent_run_id="nope")
+        store.start_run(
+            action, key_for("o3"), "x", None, RunSource.CHAIN, parent_run_id="nope"
+        )
     with pytest.raises(ValueError):
-        store.start_run(action, key_for("o4"), "x", None, RunSource.WATCH, status=RunStatus.OK)
+        store.start_run(
+            action, key_for("o4"), "x", None, RunSource.WATCH, status=RunStatus.OK
+        )
 
 
 def test_finish_run_validates(store: ActionStore, action: ActionRecord):
@@ -188,7 +224,9 @@ def test_finished_runs_are_immutable(store: ActionStore, action: ActionRecord):
     with pytest.raises(RunAlreadyFinal):
         store.finish_run(run.id, RunStatus.FAILED, error="late")
     final = store.get_run(run.id)
-    assert final is not None and final.status is RunStatus.OK and final.result == {"a": 1}
+    assert (
+        final is not None and final.status is RunStatus.OK and final.result == {"a": 1}
+    )
 
     other = store.start_run(action, key_for("2"), "make_copy", None, RunSource.WATCH)
     store.mark_interrupted([other.id])
@@ -196,7 +234,9 @@ def test_finished_runs_are_immutable(store: ActionStore, action: ActionRecord):
         store.finish_run(other.id, RunStatus.OK)
 
 
-def test_query_runs_filters(store: ActionStore, action: ActionRecord, backend: SQLiteBackend):
+def test_query_runs_filters(
+    store: ActionStore, action: ActionRecord, backend: SQLiteBackend
+):
     add_file(backend, "a.txt", "ha")
     add_file(backend, "b.txt", "hb")
     ra = store.start_run(action, key_for("ha"), "make_copy", "a.txt", RunSource.WATCH)
@@ -220,7 +260,12 @@ def test_query_runs_filters(store: ActionStore, action: ActionRecord, backend: S
 def test_mark_interrupted(store: ActionStore, action: ActionRecord):
     running = store.start_run(action, key_for("1"), "make_copy", None, RunSource.WATCH)
     queued = store.start_run(
-        action, key_for("2"), "make_copy", None, RunSource.WATCH, status=RunStatus.QUEUED
+        action,
+        key_for("2"),
+        "make_copy",
+        None,
+        RunSource.WATCH,
+        status=RunStatus.QUEUED,
     )
     done = store.start_run(action, key_for("3"), "make_copy", None, RunSource.WATCH)
     store.finish_run(done.id, RunStatus.OK)
@@ -255,7 +300,11 @@ def test_trace_is_ordered_per_run(store: ActionStore, action: ActionRecord):
     assert (first.seq, second.seq, third.seq) == (1, 2, 3)
     entries = store.query_trace(run.id)
     assert [e.kind for e in entries] == ["log", "fs.copy", "custom.kind"]
-    assert [e.payload for e in entries] == ["starting", {"src": "a", "dst": "b"}, ["x", 1, None]]
+    assert [e.payload for e in entries] == [
+        "starting",
+        {"src": "a", "dst": "b"},
+        ["x", 1, None],
+    ]
     assert [e.seq for e in store.query_trace(other.id)] == [1]
     assert store.query_trace("nope") == []
 
@@ -268,17 +317,23 @@ def test_provenance(store: ActionStore, action: ActionRecord, backend: SQLiteBac
     add_file(backend, "out/copy.txt", "c")
     run = store.start_run(action, key_for("s"), "make_copy", "src.txt", RunSource.WATCH)
 
-    seen = store.add_provenance("out/copy.txt", run.id, ProvenanceKind.OBSERVED, ambiguous=True)
+    seen = store.add_provenance(
+        "out/copy.txt", run.id, ProvenanceKind.OBSERVED, ambiguous=True
+    )
     assert seen.kind is ProvenanceKind.OBSERVED and seen.ambiguous
 
     # emitted overrides observed, never the reverse
     emitted = store.add_provenance("out/copy.txt", run.id, ProvenanceKind.EMITTED)
     assert emitted.kind is ProvenanceKind.EMITTED and not emitted.ambiguous
-    still = store.add_provenance("out/copy.txt", run.id, ProvenanceKind.OBSERVED, ambiguous=True)
+    still = store.add_provenance(
+        "out/copy.txt", run.id, ProvenanceKind.OBSERVED, ambiguous=True
+    )
     assert still.kind is ProvenanceKind.EMITTED and not still.ambiguous
 
     assert store.produced_by(run.id) == ["out/copy.txt"]
-    assert [p.run_id for p in store.query_provenance(file_path="out/copy.txt")] == [run.id]
+    assert [p.run_id for p in store.query_provenance(file_path="out/copy.txt")] == [
+        run.id
+    ]
     assert len(store.query_provenance(run_id=run.id)) == 1
     assert store.query_provenance(file_path="nope") == []
     with pytest.raises(KeyError):
@@ -288,19 +343,37 @@ def test_provenance(store: ActionStore, action: ActionRecord, backend: SQLiteBac
 # ---------------------------------------------------------------- problems
 
 
-def test_problems_and_delivery(store: ActionStore, action: ActionRecord, backend: SQLiteBackend):
+def test_problems_and_delivery(
+    store: ActionStore, action: ActionRecord, backend: SQLiteBackend
+):
     add_file(backend, "a.txt")
     run = store.start_run(action, key_for(), "make_copy", "a.txt", RunSource.WATCH)
 
-    p_info = store.record_problem(Severity.INFO, "run.ok", "done", action_name="make_copy", run_id=run.id)
-    p_err = store.record_problem(Severity.ERR, "run.failed", "boom", file_path="a.txt", run_id=run.id)
+    p_info = store.record_problem(
+        Severity.INFO, "run.ok", "done", action_name="make_copy", run_id=run.id
+    )
+    p_err = store.record_problem(
+        Severity.ERR, "run.failed", "boom", file_path="a.txt", run_id=run.id
+    )
     p_crit = store.record_problem(Severity.CRIT, "daemon.died", "bye")
-    p_warn = store.record_problem(Severity.WARN, "observed", "raw fs", file_path="missing.txt")
+    p_warn = store.record_problem(
+        Severity.WARN, "observed", "raw fs", file_path="missing.txt"
+    )
 
     assert p_err.file_id is not None and p_warn.file_id is None
-    assert [p.id for p in store.query_problems()] == [p_info.id, p_err.id, p_crit.id, p_warn.id]
-    assert [p.kind for p in store.query_problems(at_least=Severity.ERR)] == ["run.failed", "daemon.died"]
-    assert [p.kind for p in store.query_problems(at_least=Severity.CRIT)] == ["daemon.died"]
+    assert [p.id for p in store.query_problems()] == [
+        p_info.id,
+        p_err.id,
+        p_crit.id,
+        p_warn.id,
+    ]
+    assert [p.kind for p in store.query_problems(at_least=Severity.ERR)] == [
+        "run.failed",
+        "daemon.died",
+    ]
+    assert [p.kind for p in store.query_problems(at_least=Severity.CRIT)] == [
+        "daemon.died"
+    ]
     assert len(store.query_problems(at_least=Severity.INFO)) == 4
     assert len(store.query_problems(limit=2)) == 2
 
@@ -321,7 +394,9 @@ def test_file_history(store: ActionStore, action: ActionRecord, backend: SQLiteB
     backend.set_file_tags("a.txt", ["photo"])
     run = store.start_run(action, key_for("s"), "make_copy", "a.txt", RunSource.WATCH)
     store.finish_run(run.id, RunStatus.FAILED, error="x")
-    store.record_problem(Severity.ERR, "run.failed", "x", file_path="a.txt", run_id=run.id)
+    store.record_problem(
+        Severity.ERR, "run.failed", "x", file_path="a.txt", run_id=run.id
+    )
     add_file(backend, "copy.txt", "c")
     store.add_provenance("copy.txt", run.id, ProvenanceKind.EMITTED)
 
@@ -344,7 +419,10 @@ def test_canonical_json_is_deterministic_and_portable():
     assert canonical_json({"s": {"c", "a", "b"}}) == '{"s":["a","b","c"]}'
     assert canonical_json({"p": PureWindowsPath("a\\b")}) == '{"p":"a/b"}'
     assert canonical_json({"p": Path("a/b")}) == '{"p":"a/b"}'
-    assert canonical_json(datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)) == '"2024-01-02T03:04:05+00:00"'
+    assert (
+        canonical_json(datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC))
+        == '"2024-01-02T03:04:05+00:00"'
+    )
     assert canonical_json(Decimal("1.5")) == '"1.5"'
     assert canonical_json(b"\x00x") == '{"__bytes__":"AHg="}'
     assert canonical_json(Hook.ADDED) == '"added"'
@@ -373,29 +451,48 @@ def test_latest_action_follows_the_most_recent_load(store: ActionStore):
     assert back.id == v1.id
     latest = store.latest_action("f")
     assert latest is not None and latest.script_hash == "v1"
-    assert store.register_action("g", PureWindowsPath("script\\g.py"), "x", {}, []).script_path == PurePosixPath("script/g.py")
+    assert store.register_action(
+        "g", PureWindowsPath("script\\g.py"), "x", {}, []
+    ).script_path == PurePosixPath("script/g.py")
 
 
-def test_results_and_payloads_round_trip_typed_values(store: ActionStore, action: ActionRecord):
+def test_results_and_payloads_round_trip_typed_values(
+    store: ActionStore, action: ActionRecord
+):
     run = store.start_run(action, key_for(), "make_copy", None, RunSource.WATCH)
-    store.add_trace(run.id, TraceKind.RECORD, {"when": datetime(2024, 1, 1, tzinfo=UTC), "out": Path("o/x")})
-    done = store.finish_run(run.id, RunStatus.OK, result={"paths": {Path("b"), Path("a")}})
+    store.add_trace(
+        run.id,
+        TraceKind.RECORD,
+        {"when": datetime(2024, 1, 1, tzinfo=UTC), "out": Path("o/x")},
+    )
+    done = store.finish_run(
+        run.id, RunStatus.OK, result={"paths": {Path("b"), Path("a")}}
+    )
 
     assert done.result == {"paths": ["a", "b"]}
-    assert store.query_trace(run.id)[0].payload == {"when": "2024-01-01T00:00:00+00:00", "out": "o/x"}
+    assert store.query_trace(run.id)[0].payload == {
+        "when": "2024-01-01T00:00:00+00:00",
+        "out": "o/x",
+    }
     with pytest.raises(TypeError):
         store.add_trace(run.id, TraceKind.RECORD, object())
 
 
-def test_observed_provenance_accumulates_ambiguity(store: ActionStore, action: ActionRecord, backend: SQLiteBackend):
+def test_observed_provenance_accumulates_ambiguity(
+    store: ActionStore, action: ActionRecord, backend: SQLiteBackend
+):
     add_file(backend, "out.txt", "o")
     run = store.start_run(action, key_for(), "make_copy", None, RunSource.WATCH)
 
     first = store.add_provenance("out.txt", run.id, ProvenanceKind.OBSERVED)
     assert not first.ambiguous
-    second = store.add_provenance("out.txt", run.id, ProvenanceKind.OBSERVED, ambiguous=True)
+    second = store.add_provenance(
+        "out.txt", run.id, ProvenanceKind.OBSERVED, ambiguous=True
+    )
     assert second.ambiguous
-    third = store.add_provenance("out.txt", run.id, ProvenanceKind.OBSERVED, ambiguous=False)
+    third = store.add_provenance(
+        "out.txt", run.id, ProvenanceKind.OBSERVED, ambiguous=False
+    )
     assert third.ambiguous  # once ambiguous, stays ambiguous
 
     backend.delete("out.txt")
@@ -410,7 +507,9 @@ def test_observed_provenance_accumulates_ambiguity(store: ActionStore, action: A
 def test_history_includes_runs_started_before_the_row_existed(
     store: ActionStore, action: ActionRecord, backend: SQLiteBackend
 ):
-    early = store.start_run(action, key_for("s"), "make_copy", "late.txt", RunSource.WATCH)
+    early = store.start_run(
+        action, key_for("s"), "make_copy", "late.txt", RunSource.WATCH
+    )
     assert early.file_id is None
     add_file(backend, "late.txt", "s")
     backend.set_file_tags("late.txt", ["photo"])
@@ -427,27 +526,43 @@ def test_history_includes_runs_started_before_the_row_existed(
     assert store.file_history("..") is None
 
 
-def test_path_prefix_queries(store: ActionStore, action: ActionRecord, backend: SQLiteBackend):
+def test_path_prefix_queries(
+    store: ActionStore, action: ActionRecord, backend: SQLiteBackend
+):
     add_file(backend, "@@make_copy/a.txt", "a")
     add_file(backend, "@@make_copy/sub/b.txt", "b")
     add_file(backend, "@@make_copy_other/c.txt", "c")
     add_file(backend, "elsewhere/d.txt", "d")
-    ra = store.start_run(action, key_for("a"), "make_copy", "@@make_copy/a.txt", RunSource.WATCH)
+    ra = store.start_run(
+        action, key_for("a"), "make_copy", "@@make_copy/a.txt", RunSource.WATCH
+    )
     store.finish_run(ra.id, RunStatus.OK)
-    store.start_run(action, key_for("c"), "make_copy", "@@make_copy_other/c.txt", RunSource.WATCH)
+    store.start_run(
+        action, key_for("c"), "make_copy", "@@make_copy_other/c.txt", RunSource.WATCH
+    )
 
     under = backend.query_files(path_prefix="@@make_copy")
-    assert sorted(f.path.as_posix() for f in under) == ["@@make_copy/a.txt", "@@make_copy/sub/b.txt"]
+    assert sorted(f.path.as_posix() for f in under) == [
+        "@@make_copy/a.txt",
+        "@@make_copy/sub/b.txt",
+    ]
     assert [r.id for r in store.query_runs(path_prefix="@@make_copy/")] == [ra.id]
     # "which files under @@make_copy have no ok run yet": b.txt
-    done = {r.file_hash for r in store.query_runs(path_prefix="@@make_copy", status=RunStatus.OK)}
-    assert [f.path.as_posix() for f in under if f.file_hash not in done] == ["@@make_copy/sub/b.txt"]
+    done = {
+        r.file_hash
+        for r in store.query_runs(path_prefix="@@make_copy", status=RunStatus.OK)
+    }
+    assert [f.path.as_posix() for f in under if f.file_hash not in done] == [
+        "@@make_copy/sub/b.txt"
+    ]
 
 
 def test_path_prefix_runs_include_rows_started_before_the_file_existed(
     store: ActionStore, action: ActionRecord, backend: SQLiteBackend
 ):
-    early = store.start_run(action, key_for("b"), "make_copy", "@@f/b.txt", RunSource.WATCH)
+    early = store.start_run(
+        action, key_for("b"), "make_copy", "@@f/b.txt", RunSource.WATCH
+    )
     assert early.file_id is None
     add_file(backend, "@@f/b.txt", "b")
 
@@ -459,17 +574,24 @@ def test_path_prefix_runs_include_rows_started_before_the_file_existed(
 
 def test_run_key_rejects_values_that_cannot_form_a_key():
     with pytest.raises(ValueError):
-        RunKey(file_hash="h", action_name="f", hook=Hook.ADDED, args={"x": float("nan")})
+        RunKey(
+            file_hash="h", action_name="f", hook=Hook.ADDED, args={"x": float("nan")}
+        )
     with pytest.raises((ValueError, TypeError)):
         RunKey(file_hash="h", action_name="f", hook=Hook.ADDED, args={"x": object()})
 
 
-def test_delivery_and_interrupt_handle_large_id_lists(store: ActionStore, action: ActionRecord):
+def test_delivery_and_interrupt_handle_large_id_lists(
+    store: ActionStore, action: ActionRecord
+):
     ids = [store.record_problem(Severity.INFO, "k", "m").id for _ in range(5)]
     padding = [f"missing-{i}" for i in range(40_000)]
 
     assert store.mark_delivered(ids + padding) == 5
-    runs = [store.start_run(action, key_for(str(i)), "x", None, RunSource.WATCH).id for i in range(3)]
+    runs = [
+        store.start_run(action, key_for(str(i)), "x", None, RunSource.WATCH).id
+        for i in range(3)
+    ]
     assert len(store.mark_interrupted(runs + padding)) == 3
 
 
@@ -481,13 +603,17 @@ def test_since_rounds_up_to_the_next_second(store: ActionStore):
     assert store.query_problems(since=just_after) == []
 
 
-def test_store_joins_backend_transactions(store: ActionStore, action: ActionRecord, backend: SQLiteBackend):
+def test_store_joins_backend_transactions(
+    store: ActionStore, action: ActionRecord, backend: SQLiteBackend
+):
     from tag_file_system.database.sqlite import transactional
 
     class Composite(ActionStore):
         @transactional
         def run_and_fail(self) -> None:
-            self.backend.insert(filename="a.txt", file_path="a.txt", file_hash="h", file_size=1)
+            self.backend.insert(
+                filename="a.txt", file_path="a.txt", file_hash="h", file_size=1
+            )
             self.start_run(action, key_for(), "make_copy", "a.txt", RunSource.WATCH)
             raise RuntimeError("abort")
 

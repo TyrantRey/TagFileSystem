@@ -99,7 +99,9 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def file_payload(file: TaggedFile, runs: list[RunRecord] | None = None) -> dict[str, Any]:
+def file_payload(
+    file: TaggedFile, runs: list[RunRecord] | None = None
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "path": file.path.as_posix(),
         "file_id": file.file_id,
@@ -126,7 +128,9 @@ class _Server(ThreadingHTTPServer):
     # per port, and a clashing start fails at bind.
     allow_reuse_address = False
 
-    def __init__(self, bind: str, port: int, handler: type[BaseHTTPRequestHandler]) -> None:
+    def __init__(
+        self, bind: str, port: int, handler: type[BaseHTTPRequestHandler]
+    ) -> None:
         if ipaddress.ip_address(bind).version == 6:
             self.address_family = socket.AF_INET6
         super().__init__((bind, port), handler)
@@ -166,16 +170,22 @@ class ControlServer:
                 self.end_headers()
                 self.wfile.write(data)
 
-            def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+            def send_error(
+                self, code: int, message: str | None = None, explain: str | None = None
+            ) -> None:
                 # http.server's own errors (414, 400, 501) as JSON, never HTML.
                 try:
-                    self._send(HTTPStatus(code), {"error": message or HTTPStatus(code).phrase})
+                    self._send(
+                        HTTPStatus(code), {"error": message or HTTPStatus(code).phrase}
+                    )
                 except Exception:  # pragma: no cover - the socket is gone
                     pass
 
             def _route(self, method: str) -> None:
                 if not self._authorized():
-                    self._send(HTTPStatus.UNAUTHORIZED, {"error": "missing or wrong token"})
+                    self._send(
+                        HTTPStatus.UNAUTHORIZED, {"error": "missing or wrong token"}
+                    )
                     return
                 parsed = urllib.parse.urlsplit(self.path)
                 query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
@@ -185,7 +195,10 @@ class ControlServer:
                     status, body = HTTPStatus.BAD_REQUEST, {"error": str(e)}
                 except Exception as e:  # never let a handler kill the server
                     server_ref.logger.exception("control request failed")
-                    status, body = HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"{type(e).__name__}: {e}"}
+                    status, body = (
+                        HTTPStatus.INTERNAL_SERVER_ERROR,
+                        {"error": f"{type(e).__name__}: {e}"},
+                    )
                 self._send(status, body)
 
             def do_GET(self) -> None:  # noqa: N802
@@ -222,7 +235,9 @@ class ControlServer:
             target=self._server.serve_forever, name="tfs-control", daemon=True
         )
         self._thread.start()
-        self.logger.info(f"Control channel on http://{self.address[0]}:{self.address[1]}")
+        self.logger.info(
+            f"Control channel on http://{self.address[0]}:{self.address[1]}"
+        )
 
     def stop(self) -> None:
         self._server.shutdown()
@@ -246,7 +261,9 @@ class ControlServer:
         if handler is None:
             known = {p for _, p in routes}
             if path in known:
-                return HTTPStatus.METHOD_NOT_ALLOWED, {"error": f"{method} not allowed on {path}"}
+                return HTTPStatus.METHOD_NOT_ALLOWED, {
+                    "error": f"{method} not allowed on {path}"
+                }
             return HTTPStatus.NOT_FOUND, {"error": f"unknown endpoint {path}"}
         return HTTPStatus.OK, handler(query)
 
@@ -261,7 +278,10 @@ class ControlServer:
         return self.daemon.reload()
 
     def _actions(self, query: dict[str, list[str]]) -> dict[str, Any]:
-        return {"actions": self.daemon.describe_addons(), "problems": self.daemon.load_problems()}
+        return {
+            "actions": self.daemon.describe_addons(),
+            "problems": self.daemon.load_problems(),
+        }
 
     def _files(self, query: dict[str, list[str]]) -> dict[str, Any]:
         first = {k: v[0] for k, v in query.items() if v}
@@ -278,7 +298,9 @@ class ControlServer:
         )
         with_runs = parse_flag("runs", first.get("runs"))
         payload = [
-            file_payload(f, self.daemon.store.query_runs(file_path=f.path) if with_runs else None)
+            file_payload(
+                f, self.daemon.store.query_runs(file_path=f.path) if with_runs else None
+            )
             for f in files
         ]
         return {"files": payload}
@@ -300,7 +322,9 @@ class ControlClient:
         self.token = token
         self.timeout = timeout
 
-    def _call(self, method: str, path: str, params: dict[str, Any] | None = None) -> Any:
+    def _call(
+        self, method: str, path: str, params: dict[str, Any] | None = None
+    ) -> Any:
         url = self.base + path
         if params:
             pairs: list[tuple[str, str]] = []

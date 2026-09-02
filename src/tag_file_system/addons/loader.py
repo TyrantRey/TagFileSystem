@@ -12,7 +12,7 @@ Scripts are executed from source (no ``.pyc``): a cached bytecode file would
 both defeat hot reload when an edit keeps size and mtime-second, and drop a
 ``__pycache__`` directory into ``script/`` for the watcher to see.
 
-Imports *from* a script — ``from _helper import X``, ``import make_copy`` —
+imports *from* a script — ``from _helper import X``, ``import make_copy`` —
 are served by ``_ScriptFinder``, a meta-path finder that looks at the file
 the importing code lives in and answers from that root's ``script/`` only.
 It sits last in ``sys.meta_path`` and ``sys.modules`` is consulted first,
@@ -152,7 +152,9 @@ class _AddonModuleLoader(importlib.abc.Loader):
         self.owner = owner
         self.path = path
 
-    def create_module(self, spec: importlib.machinery.ModuleSpec) -> types.ModuleType | None:
+    def create_module(
+        self, spec: importlib.machinery.ModuleSpec
+    ) -> types.ModuleType | None:
         addon = self.owner.addons.get(self.path.stem)
         if addon is not None:
             return addon.module
@@ -163,7 +165,9 @@ class _AddonModuleLoader(importlib.abc.Loader):
             return executing
         attempted = self.owner._loaded_this_pass
         if attempted is not None and self.path.stem in attempted:
-            raise ImportError(f"add-on {self.path.name} failed to load")  # reported already
+            raise ImportError(
+                f"add-on {self.path.name} failed to load"
+            )  # reported already
         addon = self.owner.load(self.path)
         if addon is None:
             raise ImportError(f"add-on {self.path.name} failed to load")
@@ -267,8 +271,16 @@ class AddonLoader:
         loaded: list[Addon] = []
         try:
             for path in sorted(self.root.script_dir.iterdir()):
-                if path.name.startswith("_") or not path.is_file() or path.suffix != ".py":
-                    if path.suffix.lower() == ".py" and path.is_file() and not path.name.startswith("_"):
+                if (
+                    path.name.startswith("_")
+                    or not path.is_file()
+                    or path.suffix != ".py"
+                ):
+                    if (
+                        path.suffix.lower() == ".py"
+                        and path.is_file()
+                        and not path.name.startswith("_")
+                    ):
                         self.load(path)  # reports the .PY warning
                     continue
                 if path.stem in self._loaded_this_pass:
@@ -337,7 +349,7 @@ class AddonLoader:
         try:
             source = path.read_bytes()
             module, saved = self._execute(name, path, source)
-        except (Exception, SystemExit) as e:  # SyntaxError, ImportError, anything
+        except (Exception, SystemExit) as e:  # SyntaxError, importError, anything
             self.report(
                 Severity.ERR,
                 "addon.import",
@@ -395,7 +407,9 @@ class AddonLoader:
             self._loaded_this_pass.add(name)
         # A sibling that imported the previous version keeps its reference;
         # the bare-name entry (if any) must point at the new module.
-        if name in sys.modules and getattr(sys.modules[name], "__file__", None) == str(path):
+        if name in sys.modules and getattr(sys.modules[name], "__file__", None) == str(
+            path
+        ):
             sys.modules[name] = module
         self.logger.info(
             f"Loaded add-on {name} ({len(addon.file_handlers)} file handler(s), "
@@ -509,7 +523,9 @@ class AddonLoader:
                             )
                         assert spec.severity is not None
                         addon.problem_handlers.append(
-                            ProblemHandler(addon=addon, func=member, severity=spec.severity)
+                            ProblemHandler(
+                                addon=addon, func=member, severity=spec.severity
+                            )
                         )
                     else:
                         assert spec.hook is not None
@@ -530,7 +546,9 @@ class AddonLoader:
                             continue
                         seen_slots[slot] = (callable_name(member), spec.describe())
                         addon.file_handlers.append(
-                            FileHandler(addon=addon, func=member, spec=spec, schema=schema)
+                            FileHandler(
+                                addon=addon, func=member, spec=spec, schema=schema
+                            )
                         )
                 except Exception as e:
                     skipped += 1
