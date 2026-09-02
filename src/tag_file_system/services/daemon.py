@@ -49,6 +49,7 @@ from tag_file_system.services.control import ControlServer
 from tag_file_system.services.file_info import compute_file_hash
 from tag_file_system.services.indexer import Indexed, Indexer
 from tag_file_system.services.tagging import TaggingParser
+from tag_file_system.version import COMMIT, VERSION
 
 watchfiles.main.logger.setLevel("WARNING")
 
@@ -187,12 +188,25 @@ class Daemon:
         )
         if previous is not None and not previous.is_mine():
             stale = self.lock.is_stale(previous)
+            if previous.upgrade:
+                # A crashed `tfs upgrade` (its pid is gone, or --force pushed
+                # it aside): the code may be half-swapped, the snapshot is
+                # the safe copy.
+                what = (
+                    f"took over the upgrade marker left by pid {previous.pid} on "
+                    f"{previous.hostname} since {previous.created_at_text}: that "
+                    f"upgrade did not finish; check the checkout and .tfs/backups/"
+                )
+            else:
+                what = (
+                    f"took over the lock held by pid {previous.pid} on {previous.hostname} "
+                    f"since {previous.created_at_text}"
+                    + ("" if stale else " — that daemon may still be running")
+                )
             self.runner.problem(
                 Severity.WARN if stale else Severity.CRIT,
                 "lock.stale" if stale else "lock.overridden",
-                f"took over the lock held by pid {previous.pid} on {previous.hostname} "
-                f"since {previous.created_at_text}"
-                + ("" if stale else " — that daemon may still be running"),
+                what,
             )
         try:
             for run in self.store.mark_interrupted():
@@ -336,6 +350,10 @@ class Daemon:
             "root": str(self.root.path),
             "pid": os.getpid(),
             "started": self.started,
+            # The code this daemon runs (DESIGN/v0-2-0.md §3): `tfs upgrade`
+            # compares the hash, the one that cannot be true-but-wrong.
+            "version": VERSION,
+            "hash": COMMIT,
             "addons": sorted(self.loader.addons),
             "in_flight": in_flight,
         }

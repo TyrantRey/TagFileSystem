@@ -62,6 +62,7 @@ jobs:
           set -euo pipefail
           # $PWD, not $RUNNER_TEMP: on Windows the latter is a backslash path
           root="$PWD/ci-smoke-root"
+          uv run tfs --version
           uv run tfs init "$root"
           cp examples/script/notify.py "$root/script/"
           mkdir -p "$root/2024--trip"
@@ -69,6 +70,10 @@ jobs:
 
           uv run tfs --root "$root" start -d
           uv run tfs --root "$root" list
+          uv run tfs --root "$root" backup list
+          # `upgrade` is dispatched by the stdlib shim; --help must work
+          # without a checkout state the preflight would accept.
+          uv run tfs upgrade --help | grep -q "usage: tfs upgrade"
 
           # `start -d` returns as soon as the control channel answers, which is
           # before the first reconcile has walked the tree: poll for the file

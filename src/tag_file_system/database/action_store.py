@@ -1,7 +1,8 @@
 # Code by AkinoAlice@TyrantRey
 
 """Persistence of the action layer (DESIGN/v0-1-0.md §6–§7): ``actions``,
-``action_runs``, ``action_trace``, ``provenance`` and ``problems``.
+``action_runs``, ``action_trace``, ``provenance`` and ``problems`` — and the
+``upgrades`` log of DESIGN/v0-2-0.md §9.
 
 ``ActionStore`` shares the ``SQLiteBackend``'s connection and lock, so a
 call here joins a transaction opened by the backend (and vice versa) and
@@ -32,6 +33,7 @@ from tag_file_system.core.interface.action import (
     RunStatus,
     Severity,
     TraceEntry,
+    UpgradeRecord,
     canonical_json,
 )
 from tag_file_system.core.interface.database import PathLike
@@ -44,6 +46,7 @@ from tag_file_system.database.sqlite import (
     locked,
     transactional,
 )
+from tag_file_system.version import COMMIT, VERSION
 
 
 class RunExists(ValueError):
@@ -285,8 +288,8 @@ class ActionStore:
             """
             INSERT INTO action_runs
                 (id, action_id, action_name, hook, file_id, file_hash, slug, args_json,
-                 status, source, parent_run_id, retry_of)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, source, parent_run_id, retry_of, code_version, code_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -301,6 +304,8 @@ class ActionStore:
                 RunSource(source).value,
                 parent_run_id,
                 retry_of,
+                VERSION,
+                COMMIT,
             ),
         )
         run = self.get_run(run_id)
@@ -479,6 +484,8 @@ class ActionStore:
             retry_of=row["retry_of"],
             started_at=started,
             finished_at=_to_datetime(row["finished_at"]),
+            code_version=row["code_version"],
+            code_hash=row["code_hash"],
         )
 
     # ------------------------------------------------------------------ trace
@@ -778,4 +785,93 @@ class ActionStore:
             runs=runs,
             provenance=provenance,
             problems=problems,
+        )
+
+    # --------------------------------------------------------------- upgrades
+
+    @transactional
+    def record_upgrade(
+        self,
+        from_tag: str | None,
+        from_hash: str,
+        to_tag: str,
+        to_hash: str,
+        schema_before: int,
+        schema_after: int,
+        started_at: datetime | float,
+        outcome: str = "ok",
+        tests_run: int | None = None,
+        tests_passed: int | None = None,
+        tests_skipped: int | None = None,
+        snapshot_path: str | None = None,
+    ) -> UpgradeRecord:
+        """Write the ``upgrades`` row of DESIGN/v0-2-0.md §9. Only the new
+        code can write it, after migrating: a failed upgrade leaves its
+        evidence in the log and the snapshot, not here."""
+        cursor = self.connection.cursor()
+        upgrade_id = str(uuid4())
+        started = (
+            started_at.timestamp()
+            if isinstance(started_at, datetime)
+            else float(started_at)
+        )
+        cursor.execute(
+            """
+            INSERT INTO upgrades
+                (id, from_tag, from_hash, to_tag, to_hash, schema_before, schema_after,
+                 tests_run, tests_passed, tests_skipped, snapshot_path, outcome,
+                 started_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                upgrade_id,
+                from_tag,
+                from_hash,
+                to_tag,
+                to_hash,
+                int(schema_before),
+                int(schema_after),
+                tests_run,
+                tests_passed,
+                tests_skipped,
+                snapshot_path,
+                outcome,
+                int(started),
+            ),
+        )
+        row = cursor.execute(
+            "SELECT * FROM upgrades WHERE id = ?", (upgrade_id,)
+        ).fetchone()
+        return self._row_to_upgrade(row)
+
+    @locked
+    def query_upgrades(self, limit: int | None = None) -> list[UpgradeRecord]:
+        """Every recorded upgrade of this root, newest first."""
+        sql = "SELECT * FROM upgrades ORDER BY finished_at DESC, rowid DESC"
+        params: tuple = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        return [self._row_to_upgrade(r) for r in self.connection.execute(sql, params)]
+
+    @staticmethod
+    def _row_to_upgrade(row: sqlite3.Row) -> UpgradeRecord:
+        started = _to_datetime(row["started_at"])
+        finished = _to_datetime(row["finished_at"])
+        assert started is not None and finished is not None
+        return UpgradeRecord(
+            id=row["id"],
+            from_tag=row["from_tag"],
+            from_hash=row["from_hash"],
+            to_tag=row["to_tag"],
+            to_hash=row["to_hash"],
+            schema_before=row["schema_before"],
+            schema_after=row["schema_after"],
+            tests_run=row["tests_run"],
+            tests_passed=row["tests_passed"],
+            tests_skipped=row["tests_skipped"],
+            snapshot_path=row["snapshot_path"],
+            outcome=row["outcome"],
+            started_at=started,
+            finished_at=finished,
         )

@@ -25,6 +25,7 @@ from tag_file_system.core.interface.action import RunRecord
 from tag_file_system.core.interface.file_metadata import TaggedFile
 from tag_file_system.core.logger import logger
 from tag_file_system.core.paths import has_parent_reference, is_anchored, posix_key
+from tag_file_system.version import COMMIT, VERSION
 
 if TYPE_CHECKING:  # pragma: no cover
     from tag_file_system.services.daemon import Daemon
@@ -279,6 +280,8 @@ class ControlServer:
 
     def _actions(self, query: dict[str, list[str]]) -> dict[str, Any]:
         return {
+            "version": VERSION,
+            "hash": COMMIT,
             "actions": self.daemon.describe_addons(),
             "problems": self.daemon.load_problems(),
         }

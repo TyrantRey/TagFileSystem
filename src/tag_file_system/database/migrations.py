@@ -11,6 +11,14 @@ Version 1 is the whole v1 design: it creates the legacy tables if they are
 missing (a pre-versioning database already has them), adds the action /
 run / trace / provenance / problem tables, adds ``files.mtime_ns`` and
 rewrites ``files.path`` from absolute native to root-relative POSIX.
+
+Version 2 (DESIGN/v0-2-0.md §9) adds the ``upgrades`` table, so every root's
+history explains its own schema jumps, and stamps ``action_runs`` with the
+version and commit of the code that produced each run.
+
+``tfs upgrade`` reads ``SCHEMA_VERSION`` out of a *target* checkout with
+``git show`` and a regex, never by importing it: keep the assignment on one
+line, as a plain integer literal.
 """
 
 import sqlite3
@@ -22,7 +30,7 @@ from uuid import uuid4
 from tag_file_system.core.logger import logger
 from tag_file_system.core.paths import is_anchored, posix_key
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class SchemaTooNew(RuntimeError):
@@ -314,8 +322,43 @@ def _soft_delete(connection: sqlite3.Connection, file_id: str) -> None:
     )
 
 
+V2_SCHEMA: list[str] = [
+    """
+    CREATE TABLE IF NOT EXISTS upgrades (
+        id             TEXT    PRIMARY KEY,
+        from_tag       TEXT,
+        from_hash      TEXT    NOT NULL,
+        to_tag         TEXT    NOT NULL,
+        to_hash        TEXT    NOT NULL,
+        schema_before  INTEGER NOT NULL,
+        schema_after   INTEGER NOT NULL,
+        tests_run      INTEGER,
+        tests_passed   INTEGER,
+        tests_skipped  INTEGER,
+        snapshot_path  TEXT,
+        outcome        TEXT    NOT NULL,
+        started_at     INTEGER NOT NULL,
+        finished_at    INTEGER NOT NULL DEFAULT (unixepoch())
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_upgrades_finished_at ON upgrades(finished_at)",
+]
+
+
+def _migrate_2(
+    connection: sqlite3.Connection, root_dir: Path | None, report: MigrationReport
+) -> None:
+    for statement in V2_SCHEMA:
+        connection.execute(statement)
+    columns = _columns(connection, "action_runs")
+    if "code_version" not in columns:
+        connection.execute("ALTER TABLE action_runs ADD COLUMN code_version TEXT")
+    if "code_hash" not in columns:
+        connection.execute("ALTER TABLE action_runs ADD COLUMN code_hash TEXT")
+
+
 Migration = Callable[[sqlite3.Connection, Path | None, MigrationReport], None]
-MIGRATIONS: list[tuple[int, Migration]] = [(1, _migrate_1)]
+MIGRATIONS: list[tuple[int, Migration]] = [(1, _migrate_1), (2, _migrate_2)]
 
 
 def user_version(connection: sqlite3.Connection) -> int:
