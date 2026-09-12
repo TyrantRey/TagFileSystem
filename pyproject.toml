@@ -1,6 +1,6 @@
 [project]
 name = "tag_file_system"
-version = "0.4.0"
+version = "0.5.0"
 description = "Tags in file names, add-on functions in per-folder YAML, with a queryable SQLite log"
 readme = "README.md"
 requires-python = ">=3.12"

@@ -29,7 +29,8 @@ fatal if ignored — ``uv`` cannot replace a file another process has mapped):
   imported, and the orchestrator runs on the base interpreter, not the one
   inside ``.venv``.
 
-Everything else is driven by subprocess — ``git``, ``uv``, ``pytest`` and
+Everything else is driven by subprocess — ``git``, ``uv``, ``pytest``,
+``npm`` (the web UI's build, best effort: DESIGN/v0-5-0.md §4.3) and
 ``tfs`` itself, the latter as ``python -P -m tag_file_system.cli`` rather
 than ``uv run tfs`` (whose implicit sync would hit the launcher problem).
 """
@@ -73,6 +74,8 @@ STOP_GRACE_SECONDS = 5.0  # on top of the daemon's stop_timeout_seconds
 START_TIMEOUT = 120.0
 SYNC_TIMEOUT = 15 * 60.0
 TESTS_TIMEOUT = 45 * 60.0
+FRONTEND_DIR = "Frontend"  # the web UI; its dist/ is what the daemon serves
+FRONTEND_TIMEOUT = 15 * 60.0
 
 _MAX_PID = 2**31 - 1
 _HASH = re.compile(r"[0-9a-f]{40}")
@@ -716,6 +719,7 @@ class Plan:
             # -P: never let the working directory shadow the package
             "tfs": [self.python, "-P", "-m", f"{PACKAGE}.cli"],
             "pytest": [self.python, "-P", "-m", "pytest"],
+            "npm": ["npm"],  # resolved with shutil.which: npm.cmd on Windows
         }
         return list(self.commands.get(name) or defaults[name])
 
@@ -1066,6 +1070,41 @@ def _sync(plan: Plan) -> None:
         raise StepFailed(f"uv sync failed:\n{_tail(result.stderr or result.stdout)}")
 
 
+def _build_frontend(plan: Plan) -> str | None:
+    """Build the web UI from the code just checked out (DESIGN/v0-5-0.md
+    §4.3): ``npm ci`` then ``npm run build`` in ``Frontend/``. Best effort —
+    the daemon serves its data without it and answers 503 at ``/ui/`` — so
+    whatever goes wrong is said, returned as a warning, and never a
+    ``StepFailed``. ``None`` when there is nothing to build or it built."""
+    frontend = Path(plan.repo) / FRONTEND_DIR
+    if not (frontend / "package.json").is_file():
+        return None
+    npm = plan.command("npm")
+    found = shutil.which(npm[0])
+    hint = f"run `npm ci && npm run build` in {frontend} to serve /ui"
+    if found is None:
+        warning = f"npm is not on PATH: the web UI was not built; {hint}"
+        say(f"warning: {warning}")
+        return warning
+    npm[0] = found
+    for step in (["ci", "--no-audit", "--no-fund"], ["run", "build"]):
+        try:
+            result = run_command([*npm, *step], cwd=frontend, timeout=FRONTEND_TIMEOUT)
+        except UpdateError as e:
+            warning = f"the web UI was not built (npm {step[0]}: {e}); {hint}"
+            say(f"warning: {warning}")
+            return warning
+        if result.returncode != 0:
+            warning = (
+                f"the web UI was not built (npm {' '.join(step)} failed):\n"
+                f"{_tail(result.stderr or result.stdout)}\n{hint}"
+            )
+            say(f"warning: {warning}")
+            return warning
+    say("web UI built")
+    return None
+
+
 _SUMMARY = re.compile(r"(\d+) (passed|failed|skipped|error|errors)\b")
 
 
@@ -1249,6 +1288,9 @@ def _revert(
     try:
         _checkout(plan, plan.from_ref, plan.from_hash)
         _sync(plan)
+        # dist/ is not under git: a revert must not leave the new UI beside
+        # the old code. Best effort, like the build it undoes.
+        _build_frontend(plan)
         say(f"code back at {plan.from_version} ({short(plan.from_hash)})")
     except (StepFailed, UpdateError) as e:
         failures.append(f"code revert: {e}")
@@ -1301,6 +1343,7 @@ def run_plan(plan: Plan) -> int:
     stopped: list[RootState] = []
     started_new: list[RootState] = []
     snapshots: dict[str, Path] = {}
+    warnings: list[str] = []  # said when they happen, counted at the end
     stage = "prepare"
     say(
         f"{plan.from_version} ({short(plan.from_hash)}) -> {plan.to_tag} "
@@ -1332,6 +1375,9 @@ def run_plan(plan: Plan) -> int:
         _checkout(plan, f"refs/tags/{plan.to_tag}", plan.to_hash)
         say("syncing dependencies")
         _sync(plan)
+        warning = _build_frontend(plan)
+        if warning is not None:
+            warnings.append(warning)
 
         stage = "tests"
         tests = None if plan.skip_tests else _run_tests(plan)
@@ -1360,13 +1406,14 @@ def run_plan(plan: Plan) -> int:
 
         for problem in problems:
             say(problem)
+        noted = f", with {len(warnings)} warning(s)" if warnings else ""
         if problems:
             say(
                 f"upgraded to {plan.to_version} ({short(plan.to_hash)}), but "
-                f"{len(problems)} root(s) could not record it"
+                f"{len(problems)} root(s) could not record it{noted}"
             )
             return 1
-        say(f"upgraded to {plan.to_version} ({short(plan.to_hash)})")
+        say(f"upgraded to {plan.to_version} ({short(plan.to_hash)}){noted}")
         return 0
     except (StepFailed, UpdateError) as e:
         say(f"failed while {_describe_stage(stage)}: {e}")
@@ -1443,6 +1490,11 @@ def print_plan(plan: Plan) -> None:
         "  tests      skipped (--skip-tests)"
         if plan.skip_tests
         else "  tests      full suite before the daemons restart"
+    )
+    print(
+        "  web UI     npm ci && npm run build in Frontend/ (a failure is a warning)"
+        if shutil.which(plan.command("npm")[0])
+        else "  web UI     not built: npm is not on PATH (a warning, not a failure)"
     )
     print(f"  roots      {len(plan.roots)} known ({registry_path()}):")
     for state in plan.roots:

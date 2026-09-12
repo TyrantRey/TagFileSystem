@@ -52,6 +52,7 @@ from tag_file_system.services.control import ControlServer
 from tag_file_system.services.file_info import compute_file_hash
 from tag_file_system.services.indexer import Indexed, Indexer
 from tag_file_system.services.tagging import TaggingParser
+from tag_file_system.services.ui import default_ui_dir
 from tag_file_system.services.views import DAEMON, actions_view, explain_view
 from tag_file_system.version import COMMIT, VERSION
 
@@ -113,6 +114,7 @@ class Daemon:
         poll_ms: int = 1000,
         control: bool = False,
         apply_logging: bool = False,
+        ui_dir: Path | None = None,
     ) -> None:
         self.root = root
         self.config = config if config is not None else root.load_config()
@@ -121,6 +123,9 @@ class Daemon:
         self.logger = logger
         self.control_enabled = control
         self.control: ControlServer | None = None
+        # The built web UI (DESIGN/v0-5-0.md §3.3): the checkout's
+        # Frontend/dist unless a test says otherwise.
+        self.ui_dir = ui_dir if ui_dir is not None else default_ui_dir()
         self.apply_logging = apply_logging  # re-apply [logging] on reload
         self.case_insensitive = _case_insensitive(root.tfs_dir)
         self._load_problems: dict[str, list[dict]] = {}  # script file -> problems
@@ -302,6 +307,7 @@ class Daemon:
                     self.config.daemon.bind,
                     self.config.daemon.port,
                     self.root.read_token(),
+                    ui_dir=self.ui_dir,
                 )
                 self.control.start()
             self._load()
@@ -820,6 +826,12 @@ class Daemon:
                 # A 0.3.x daemon indexed the configuration file as data;
                 # retire the row quietly, no handler ever applied to it.
                 self.backend.delete(row.path)
+                continue
+            if self.root.absolute(row.path).is_file():
+                # Written while the walk was under way — a run's ctx.copy or
+                # ctx.write into a folder the walk had already listed. The
+                # context indexed it and chained its own functions: not gone,
+                # and not a move of the file it was made from.
                 continue
             self.backend.delete(row.path)
             moved = row.file_hash in fresh_hashes

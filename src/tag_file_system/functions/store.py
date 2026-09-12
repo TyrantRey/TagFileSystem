@@ -283,6 +283,61 @@ def _jsonable_args(args: dict[str, Any]) -> Any:
     return json.loads(canonical_json(args))
 
 
+def functions_payload(store: FunctionsStore) -> dict[str, Any]:
+    """Every loaded configuration file as data, root first
+    (``GET /api/v1/functions``, DESIGN/v0-5-0.md §2): each folder's file with
+    its entries, whether each binds, the blocks that never became entries,
+    and a file-level error when the last read was refused."""
+    files: list[dict[str, Any]] = []
+    for folder in sorted({*store.files, *store._file_errors}, key=_folder_order):
+        parsed = store.files.get(folder)
+        error = store._file_errors.get(folder)
+        valid = {id(entry) for entry in store._bound.get(folder, [])}
+        problems = {
+            ref: (kind, message) for ref, kind, message in store.invalid.get(folder, [])
+        }
+        entries: list[dict[str, Any]] = []
+        invalid: list[dict[str, Any]] = []
+        if parsed is not None:
+            for entry in parsed.entries:
+                problem = None if id(entry) in valid else problems.get(entry.ref)
+                entries.append(
+                    {
+                        "script": entry.script,
+                        "handler": entry.handler,
+                        "args": _jsonable_args(entry.args),
+                        "display": entry.display(),
+                        "exclude": entry.exclude.text(),
+                        "order": entry.order,
+                        "valid": id(entry) in valid,
+                        "problem": (
+                            {"kind": problem[0], "message": problem[1]}
+                            if problem is not None
+                            else None
+                        ),
+                    }
+                )
+            invalid = [
+                {"ref": ref, "kind": kind, "message": message}
+                for ref, kind, message in parsed.invalid
+            ]
+        files.append(
+            {
+                "folder": folder,
+                "file": file_label(folder),
+                "digest": parsed.digest if parsed is not None else None,
+                "error": (
+                    {"kind": error[0], "message": error[1]}
+                    if error is not None
+                    else None
+                ),
+                "entries": entries,
+                "invalid": invalid,
+            }
+        )
+    return {"files": files, "problems": list(store.problems)}
+
+
 def explain_payload(
     store: FunctionsStore,
     loader: AddonLoader,

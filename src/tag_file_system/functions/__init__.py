@@ -32,6 +32,7 @@ from tag_file_system.functions.store import (
     chain,
     explain_payload,
     folder_of,
+    functions_payload,
 )
 
 __all__ = [
@@ -58,6 +59,7 @@ __all__ = [
     "explain_payload",
     "file_label",
     "folder_of",
+    "functions_payload",
     "load_file",
     "parse_predicate",
 ]

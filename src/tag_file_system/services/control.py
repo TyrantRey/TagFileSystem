@@ -1,11 +1,15 @@
 # Code by AkinoAlice@TyrantRey
 
-"""The daemon's HTTP control channel and its client (DESIGN/v0-1-0.md §8).
+"""The daemon's HTTP control channel and its client (DESIGN/v0-1-0.md §8,
+DESIGN/v0-5-0.md §2–§3).
 
-A small JSON-over-HTTP server bound to ``[daemon] bind:port``, every request
-authenticated with ``Authorization: Bearer <.tfs/token>``. It is the seed of
-the later API/MCP: ``/health``, ``/stop``, ``/reload``, ``/actions``,
-``/files``, ``/explain``. ``ControlClient`` is what the ``tfs`` CLI talks to.
+A small JSON-over-HTTP server bound to ``[daemon] bind:port``. Three kinds of
+route: the CLI's own (``/health``, ``/stop``, ``/reload``, ``/actions``,
+``/files``, ``/explain`` — shapes frozen), the versioned API (``/api/v1/...``,
+``services/api.py``), and the built web UI's files (``/ui/...``,
+``services/ui.py``). Everything but ``/ui/`` wants ``Authorization: Bearer
+<.tfs/token>``; the UI's files hold no data and are served without it.
+``ControlClient`` is what the ``tfs`` CLI talks to.
 """
 
 import ipaddress
@@ -15,17 +19,25 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from tag_file_system.core.interface.action import RunRecord
-from tag_file_system.core.interface.file_metadata import TaggedFile
 from tag_file_system.core.logger import logger
-from tag_file_system.core.paths import has_parent_reference, is_anchored, posix_key
-from tag_file_system.root import FUNCTIONS_FILE, same_name
+from tag_file_system.services.api import (  # noqa: F401 - re-exported for the CLI
+    API_PREFIX,
+    Api,
+    BadRequest,
+    NotFound,
+    file_payload,
+    jsonable,
+    parse_file_filters,
+    parse_file_key,
+    parse_flag,
+    validate_prefix,
+)
+from tag_file_system.services.ui import NOT_BUILT, UI_PREFIX, UiFiles
 from tag_file_system.version import COMMIT, VERSION
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -50,73 +62,6 @@ class ControlUnavailable(ControlError):
 
     def __str__(self) -> str:
         return self.message
-
-
-class BadRequest(ValueError):
-    """A request parameter the server rejects (HTTP 400)."""
-
-
-_TRUE = {"1", "true", "yes", "on"}
-_FALSE = {"0", "false", "no", "off", ""}
-
-
-def parse_flag(name: str, value: str | None) -> bool:
-    if value is None:
-        return False
-    text = value.strip().lower()
-    if text in _TRUE:
-        return True
-    if text in _FALSE:
-        return False
-    raise BadRequest(f"{name} must be true or false, got {value!r}")
-
-
-def validate_prefix(prefix: str | None) -> str | None:
-    """A ``prefix`` must be a root-relative directory key."""
-    if prefix is None:
-        return None
-    text = prefix.strip()
-    if not text or text in (".", "./"):
-        raise BadRequest("prefix must name a directory below the root")
-    if is_anchored(text) or has_parent_reference(Path(text)):
-        raise BadRequest(f"prefix must be a root-relative directory, got {prefix!r}")
-    try:
-        key = posix_key(text)
-    except ValueError as e:
-        raise BadRequest(f"prefix: {e}") from None
-    if key == ".":
-        raise BadRequest("prefix must name a directory below the root")
-    return key
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if hasattr(value, "model_dump"):
-        return value.model_dump(mode="json")
-    if isinstance(value, dict):
-        return {k: _jsonable(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(v) for v in value]
-    return value
-
-
-def file_payload(
-    file: TaggedFile, runs: list[RunRecord] | None = None
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "path": file.path.as_posix(),
-        "file_id": file.file_id,
-        "hash": file.file_hash,
-        "status": file.status,
-        "tags": [t.name for t in file.tags],
-        "size": file.metadata.file_size if file.metadata else None,
-        "mime_type": file.metadata.mime_type if file.metadata else None,
-        "added": file.metadata.time_added.isoformat() if file.metadata else None,
-    }
-    if runs is not None:
-        payload["runs"] = [_jsonable(r) for r in runs]
-    return payload
 
 
 # ------------------------------------------------------------------ server
@@ -148,10 +93,29 @@ class _Server(ThreadingHTTPServer):
 
 
 class ControlServer:
-    def __init__(self, daemon: "Daemon", bind: str, port: int, token: str) -> None:
+    def __init__(
+        self,
+        daemon: "Daemon",
+        bind: str,
+        port: int,
+        token: str,
+        ui_dir: Path | None = None,
+    ) -> None:
         self.daemon = daemon
         self.token = token
         self.logger = logger
+        self.ui = UiFiles(ui_dir)
+        self.api = Api(daemon, self.ui)
+        # Built once: the CLI's routes, then the versioned API's.
+        self._routes: dict[tuple[str, str], Callable[[dict[str, list[str]]], Any]] = {
+            ("GET", "/health"): self._health,
+            ("POST", "/stop"): self._stop,
+            ("POST", "/reload"): self._reload,
+            ("GET", "/actions"): self.api.addons,
+            ("GET", "/files"): self._files,
+            ("GET", "/explain"): self._explain,
+            **self.api.routes(),
+        }
         server_ref = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -165,12 +129,41 @@ class ControlServer:
                 return header == f"Bearer {server_ref.token}"
 
             def _send(self, status: HTTPStatus, body: Any) -> None:
-                data = json.dumps(_jsonable(body)).encode("utf-8")
+                data = json.dumps(jsonable(body)).encode("utf-8")
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 self.wfile.write(data)
+
+            def _serve_ui(self, method: str, path: str) -> None:
+                """A file of the built UI: no token, no data, no listing."""
+                if method not in ("GET", "HEAD"):
+                    self._send(
+                        HTTPStatus.METHOD_NOT_ALLOWED,
+                        {"error": f"{method} not allowed on {path}"},
+                    )
+                    return
+                ui = server_ref.ui
+                if not ui.built:
+                    self._send(
+                        HTTPStatus.SERVICE_UNAVAILABLE,
+                        {"error": NOT_BUILT, "dist": ui.describe()["dist"]},
+                    )
+                    return
+                asset = ui.resolve(path)
+                if asset is None:
+                    self._send(HTTPStatus.NOT_FOUND, {"error": "not found"})
+                    return
+                data = asset.path.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", asset.content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", asset.cache_control)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                if method == "GET":
+                    self.wfile.write(data)
 
             def send_error(
                 self, code: int, message: str | None = None, explain: str | None = None
@@ -184,17 +177,25 @@ class ControlServer:
                     pass
 
             def _route(self, method: str) -> None:
+                parsed = urllib.parse.urlsplit(self.path)
+                path = parsed.path
+                if path == UI_PREFIX or path.startswith(UI_PREFIX + "/"):
+                    # The UI's files hold no data: served before the token
+                    # check, and only ever a file under dist (DESIGN/v0-5-0.md §3.2).
+                    self._serve_ui(method, path)
+                    return
                 if not self._authorized():
                     self._send(
                         HTTPStatus.UNAUTHORIZED, {"error": "missing or wrong token"}
                     )
                     return
-                parsed = urllib.parse.urlsplit(self.path)
                 query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
                 try:
-                    status, body = server_ref.dispatch(method, parsed.path, query)
+                    status, body = server_ref.dispatch(method, path, query)
                 except BadRequest as e:
                     status, body = HTTPStatus.BAD_REQUEST, {"error": str(e)}
+                except NotFound as e:
+                    status, body = HTTPStatus.NOT_FOUND, {"error": str(e)}
                 except Exception as e:  # never let a handler kill the server
                     server_ref.logger.exception("control request failed")
                     status, body = (
@@ -252,20 +253,16 @@ class ControlServer:
     def dispatch(
         self, method: str, path: str, query: dict[str, list[str]]
     ) -> tuple[HTTPStatus, Any]:
-        routes: dict[tuple[str, str], Callable[[dict[str, list[str]]], Any]] = {
-            ("GET", "/health"): self._health,
-            ("POST", "/stop"): self._stop,
-            ("POST", "/reload"): self._reload,
-            ("GET", "/actions"): self._actions,
-            ("GET", "/files"): self._files,
-            ("GET", "/explain"): self._explain,
-        }
-        handler = routes.get((method, path))
+        handler = self._routes.get((method, path))
         if handler is None:
-            known = {p for _, p in routes}
+            known = {p for _, p in self._routes}
             if path in known:
                 return HTTPStatus.METHOD_NOT_ALLOWED, {
                     "error": f"{method} not allowed on {path}"
+                }
+            if path.startswith("/api/") and not path.startswith(API_PREFIX + "/"):
+                return HTTPStatus.NOT_FOUND, {
+                    "error": f"unknown API version; this daemon serves {API_PREFIX}"
                 }
             return HTTPStatus.NOT_FOUND, {"error": f"unknown endpoint {path}"}
         return HTTPStatus.OK, handler(query)
@@ -280,39 +277,15 @@ class ControlServer:
     def _reload(self, query: dict[str, list[str]]) -> dict[str, Any]:
         return self.daemon.reload()
 
-    def _actions(self, query: dict[str, list[str]]) -> dict[str, Any]:
-        return {"version": VERSION, "hash": COMMIT, **self.daemon.actions_view()}
-
     def _explain(self, query: dict[str, list[str]]) -> dict[str, Any]:
         """``tfs explain``: ``?path=<root-relative file>``."""
-        values = query.get("path", [])
-        text = values[0].strip() if values else ""
-        if not text:
-            raise BadRequest("path is required")
-        if is_anchored(text) or has_parent_reference(text):
-            raise BadRequest(f"{text!r} is not a root-relative path")
-        try:
-            key = posix_key(text)
-        except ValueError as e:
-            raise BadRequest(str(e)) from e
-        if same_name(PurePosixPath(key).name, FUNCTIONS_FILE):
-            raise BadRequest(f"{key} is a configuration file, not a data file")
-        return self.daemon.explain(key)
+        return self.daemon.explain(parse_file_key(query))
 
     def _files(self, query: dict[str, list[str]]) -> dict[str, Any]:
-        first = {k: v[0] for k, v in query.items() if v}
-        tags = query.get("tag") or []
-        if any(not t.strip() for t in tags):
-            raise BadRequest("tag cannot be blank")
-        files = self.daemon.backend.query_files(
-            tags=[t.strip() for t in tags] or None,
-            filename=first.get("name") or None,
-            file_format=first.get("format") or None,
-            mime_type=first.get("mime") or None,
-            include_deleted=parse_flag("deleted", first.get("deleted")),
-            path_prefix=validate_prefix(first.get("prefix") or None),
-        )
-        with_runs = parse_flag("runs", first.get("runs"))
+        """``tfs query``: the CLI's list, unpaged, ``runs=1`` for each file's
+        history — its shape is frozen (DESIGN/v0-5-0.md §2.2)."""
+        files = self.daemon.backend.query_files(**parse_file_filters(query))
+        with_runs = parse_flag("runs", (query.get("runs") or [None])[0])
         payload = [
             file_payload(
                 f, self.daemon.store.query_runs(file_path=f.path) if with_runs else None
@@ -380,6 +353,10 @@ class ControlClient:
     def actions(self) -> dict[str, Any]:
         """``{"actions": [...], "problems": [...]}``."""
         return self._call("GET", "/actions")
+
+    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        """Any ``GET`` — the versioned API (``/api/v1/...``) included."""
+        return self._call("GET", path, params)
 
     def explain(self, path: str) -> dict[str, Any]:
         """What applies to one file and why (DESIGN/v0-4-0.md §9)."""

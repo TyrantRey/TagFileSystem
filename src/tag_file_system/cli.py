@@ -4,7 +4,7 @@
 DESIGN/v0-4-0.md §9–§10).
 
     tfs init [dir]      tfs list      tfs query -t a -t b ...
-    tfs explain PATH    tfs migrate [--apply] [--rename]
+    tfs explain PATH    tfs migrate [--apply] [--rename]   tfs ui [--open]
     tfs reload          tfs start [-d] [--force]      tfs stop
     tfs update [--json]                tfs upgrade [--to TAG] [--dry-run] ...
     tfs backup list | prune [--keep N] tfs --version
@@ -27,6 +27,7 @@ import socket
 import subprocess
 import sys
 import time
+import webbrowser
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
@@ -50,12 +51,14 @@ from tag_file_system.root import (
     pid_alive,
     same_name,
 )
+from tag_file_system.services.api import API_PREFIX
 from tag_file_system.services.control import (
     ControlClient,
     ControlError,
     ControlUnavailable,
     file_payload,
 )
+from tag_file_system.services.ui import UI_PREFIX
 from tag_file_system.services.views import (
     DAEMON,
     DISK,
@@ -583,6 +586,55 @@ def explain(
             )
 
 
+# -------------------------------------------------------------------- ui
+
+
+@app.command()
+def ui(
+    root: RootOption = None,
+    open_browser: Annotated[
+        bool, typer.Option("--open", help="Open the address in the default browser.")
+    ] = False,
+) -> None:
+    """Print the web UI's address, token included (DESIGN/v0-5-0.md §3.2).
+
+    The token rides in the URL fragment: the browser never sends a fragment,
+    so the daemon's log never sees it; the page keeps it for its API calls.
+    """
+    where = _root(root)
+    holder = Lock(where).holder()
+    busy = _upgrade_in_progress(holder)
+    if busy is not None:
+        raise _fail(f"{busy}; the root is not available until it finishes")
+    try:
+        client = _client(where, holder)
+        status = client.get(f"{API_PREFIX}/status")
+    except ControlError as e:
+        reason = _unreachable(e, holder)
+        if reason is not None:
+            raise _fail(
+                f"no daemon answers ({reason}); the web UI needs the daemon: "
+                "run `tfs start -d` first"
+            )
+        if e.status == 404:
+            raise _fail(
+                "the running daemon predates the API (0.4.x): stop and start it"
+            )
+        raise _fail(str(e))
+    url = f"{client.base}{UI_PREFIX}/#token={where.read_token()}"
+    built = status.get("ui") or {}
+    if not built.get("built"):
+        typer.echo(
+            f"warning: the web UI is not built ({built.get('dist') or 'Frontend/dist'}); "
+            "the daemon answers 503 at /ui/ until `npm ci && npm run build` "
+            "has run in Frontend/",
+            err=True,
+        )
+    typer.echo(url)
+    if open_browser:
+        webbrowser.open(url)
+
+
 # --------------------------------------------------------------- migrate
 
 
@@ -799,8 +851,13 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
         kwargs["creationflags"] = (
             # Both constants are Windows-only; getattr keeps the Linux type
             # check (and any non-Windows import of this module) quiet.
+            # CREATE_NO_WINDOW, not DETACHED_PROCESS: the venv's python.exe is
+            # a launcher whose child is the interpreter. Detached, the launcher
+            # has no console, so the interpreter allocates a visible one — a
+            # console window on every `start -d` (verified). A hidden console
+            # is inherited by the interpreter and by whatever an add-on spawns.
             getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200)
-            | getattr(subprocess, "DETACHED_PROCESS", 0x8)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
         )
     else:
         kwargs["start_new_session"] = True
@@ -954,7 +1011,8 @@ def _signal_stop(pid: int) -> bool | None:
     """Ask ``pid`` to stop. ``True`` = graceful signal sent, ``False`` = it had
     to be killed, ``None`` = neither worked."""
     if os.name == "nt":
-        # A detached console-less daemon cannot receive CTRL_BREAK; taskkill
+        # The daemon has its own hidden console: our CTRL_BREAK cannot reach
+        # it, and taskkill
         # without /F is ignored by console applications. Kill it.
         result = subprocess.run(
             ["taskkill", "/PID", str(pid), "/F"], capture_output=True

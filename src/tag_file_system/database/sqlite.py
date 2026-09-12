@@ -5,7 +5,7 @@ import threading
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 from uuid import uuid4
 
 from tag_file_system.core.interface.database import (
@@ -675,16 +675,154 @@ class SQLiteBackend:
         file_added_range: tuple[datetime, datetime] | None = None,
         include_deleted: bool = False,
         path_prefix: str | None = None,
+        newest_first: bool = False,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[TaggedFile]:
         """Find files matching every given criterion.
 
         ``tags`` / ``tag_ids`` require the file to carry *all* listed tags.
         ``filename`` is a case-insensitive substring match; ``file_format`` is
         the suffix with its dot (``.txt``), ``file_type`` the suffix without it.
-        ``path_prefix`` is a root-relative directory key (``"@@make_copy"``):
-        only files below that directory match.
+        ``path_prefix`` is a root-relative directory key (``"2024--trip"``):
+        only files below that directory match. Oldest first unless
+        ``newest_first``; ``limit``/``offset`` page the result in SQL
+        (``count_files`` with the same filters gives the total).
         """
         cursor = self.connection.cursor()
+        where = self._file_clauses(
+            cursor,
+            tags=tags,
+            tag_ids=tag_ids,
+            filename=filename,
+            file_hash=file_hash,
+            file_format=file_format,
+            file_type=file_type,
+            mime_type=mime_type,
+            file_size_range=file_size_range,
+            file_added_range=file_added_range,
+            include_deleted=include_deleted,
+            path_prefix=path_prefix,
+        )
+        if where is None:
+            return []
+        clauses, params = where
+        sql = "SELECT f.* FROM files f"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        order = " DESC" if newest_first else ""
+        sql += f" ORDER BY f.created_at{order}, f.path{order}"
+        if limit is not None or offset:
+            # SQLite wants a LIMIT before an OFFSET; -1 means "no limit".
+            sql += " LIMIT ? OFFSET ?"
+            params.extend((int(limit) if limit is not None else -1, int(offset)))
+
+        rows = cursor.execute(sql, params).fetchall()
+        if not rows:
+            return []
+
+        tags_by_file = self._load_tags(cursor, [row["id"] for row in rows])
+        return [self._row_to_tagged_file(row, tags_by_file[row["id"]]) for row in rows]
+
+    @locked
+    def count_files(
+        self,
+        tags: list[str] | None = None,
+        tag_ids: list[str] | None = None,
+        filename: str | None = None,
+        file_hash: str | None = None,
+        file_format: str | None = None,
+        file_type: str | None = None,
+        mime_type: str | None = None,
+        file_size_range: tuple[int, int] | None = None,
+        file_added_range: tuple[datetime, datetime] | None = None,
+        include_deleted: bool = False,
+        path_prefix: str | None = None,
+    ) -> int:
+        """How many files ``query_files`` would return for the same filters."""
+        cursor = self.connection.cursor()
+        where = self._file_clauses(
+            cursor,
+            tags=tags,
+            tag_ids=tag_ids,
+            filename=filename,
+            file_hash=file_hash,
+            file_format=file_format,
+            file_type=file_type,
+            mime_type=mime_type,
+            file_size_range=file_size_range,
+            file_added_range=file_added_range,
+            include_deleted=include_deleted,
+            path_prefix=path_prefix,
+        )
+        if where is None:
+            return 0
+        clauses, params = where
+        sql = "SELECT COUNT(*) FROM files f"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        return int(cursor.execute(sql, params).fetchone()[0])
+
+    @locked
+    def tag_counts(self, include_deleted: bool = False) -> list[tuple[Tag, int]]:
+        """Every tag with the number of files carrying it, by name."""
+        cursor = self.connection.cursor()
+        alive = "" if include_deleted else " AND f.status <> 'deleted'"
+        rows = cursor.execute(
+            f"""
+            SELECT t.id, t.name, t.created_at, COUNT(f.id) AS files
+            FROM tags t
+            LEFT JOIN tagged_files tf ON tf.tag_id = t.id
+            LEFT JOIN files f ON f.id = tf.file_id{alive}
+            GROUP BY t.id
+            ORDER BY t.name
+            """
+        ).fetchall()
+        return [
+            (
+                Tag(
+                    name=row["name"],
+                    tag_id=row["id"],
+                    time_added=_to_datetime(row["created_at"]),
+                ),
+                int(row["files"]),
+            )
+            for row in rows
+        ]
+
+    @locked
+    def query_paths(self, file_ids: Iterable[str]) -> dict[str, str]:
+        """The key of every known file id, soft-deleted rows included — what a
+        run or a problem that only carries ``file_id`` was about."""
+        wanted: list[str] = [i for i in dict.fromkeys(file_ids) if i]
+        found: dict[str, str] = {}
+        cursor = self.connection.cursor()
+        for chunk in _chunks(wanted):
+            for row in cursor.execute(
+                f"SELECT id, path FROM files WHERE id IN ({_placeholders(len(chunk))})",
+                chunk,
+            ):
+                found[row["id"]] = row["path"]
+        return found
+
+    def _file_clauses(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        tags: list[str] | None,
+        tag_ids: list[str] | None,
+        filename: str | None,
+        file_hash: str | None,
+        file_format: str | None,
+        file_type: str | None,
+        mime_type: str | None,
+        file_size_range: tuple[int, int] | None,
+        file_added_range: tuple[datetime, datetime] | None,
+        include_deleted: bool,
+        path_prefix: str | None,
+    ) -> tuple[list[str], list[Any]] | None:
+        """The ``WHERE`` of ``query_files``/``count_files`` over ``files f``;
+        ``None`` when a requested tag does not exist (nothing can match)."""
         clauses: list[str] = []
         params: list[Any] = []
 
@@ -738,7 +876,7 @@ class SQLiteBackend:
         required_tag_ids = self._resolve_tag_ids(cursor, tags, tag_ids)
         if required_tag_ids is None:
             # A requested tag does not exist, so no file can carry all of them.
-            return []
+            return None
         if required_tag_ids:
             clauses.append(
                 f"""
@@ -752,18 +890,7 @@ class SQLiteBackend:
             )
             params.extend(required_tag_ids)
             params.append(len(required_tag_ids))
-
-        sql = "SELECT f.* FROM files f"
-        if clauses:
-            sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY f.created_at, f.path"
-
-        rows = cursor.execute(sql, params).fetchall()
-        if not rows:
-            return []
-
-        tags_by_file = self._load_tags(cursor, [row["id"] for row in rows])
-        return [self._row_to_tagged_file(row, tags_by_file[row["id"]]) for row in rows]
+        return clauses, params
 
     def _resolve_tag_ids(
         self,

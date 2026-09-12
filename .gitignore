@@ -28,3 +28,9 @@ test.txt
 # CI smoke root (see .github/workflows/test.yml)
 ci-smoke-root/
 demo/
+
+Frontend/node_modules/
+# The web UI (Frontend/): installed and built, never committed
+Frontend/node_modules/
+Frontend/dist/
+Frontend/coverage/
