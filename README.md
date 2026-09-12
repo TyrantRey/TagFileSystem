@@ -21,6 +21,8 @@ designs, one per release; this README is the short version.
 
 - Python 3.12
 - [`uv`](https://docs.astral.sh/uv/)
+- Node.js 20+ and `npm` — only to build the web UI (`Frontend/`); the daemon
+  and the CLI need neither
 
 ## Install
 
@@ -46,6 +48,7 @@ uv run tfs query --under 2024--trip --runs --json
 uv run tfs explain 2024--trip/beach--favorite.jpg   # what applies to one file, and why
 uv run tfs list                          # loaded add-ons and their handlers
 uv run tfs reload                        # after editing config.toml or a .tfsfunctions.yaml
+uv run tfs ui --open                     # the web dashboard (see Web UI: build it once first)
 uv run tfs stop
 ```
 
@@ -54,7 +57,7 @@ uv run tfs stop
 foreground or not; `.tfs/daemon.out` holds only what a detached daemon
 printed — where to look if it died. Every command accepts `--root <dir>`
 instead of discovering the root from the current directory. `tfs --version`
-prints the version and the commit it runs from (`0.4.0 (abc1234)`).
+prints the version and the commit it runs from (`0.5.0 (abc1234)`).
 
 ## How to use
 
@@ -95,7 +98,8 @@ The daemon does nothing you did not write into a name or a
    what excluded the rest; `tfs list` shows the loaded add-ons, their
    handlers and anything that failed to load. All talk to the daemon; with
    no daemon running they read `script/`, the `.tfsfunctions.yaml` files
-   and the database directly (never over a network mount).
+   and the database directly (never over a network mount). `tfs ui` opens
+   the same answers in a browser (see [Web UI](#web-ui)).
 8. **Change things while it runs.** Add-ons are re-imported the moment
    their file changes. A `.tfsfunctions.yaml` is **not**: an edit is
    reported as drift and applied by `tfs reload`, which also re-reads
@@ -131,6 +135,7 @@ or activate the virtual environment once and call `tfs` directly. `--root DIR`
 | `tfs query` | `-t/--tag TAG` (repeatable, ANDed), `--name TEXT`, `--format .EXT`, `--mime TYPE` or `family/*`, `--under DIR`, `--deleted`, `--runs`, `--json` | Files matching every criterion. `--under` is a root-relative directory such as `2024--trip`; `--runs` adds each file's run history. |
 | `tfs explain PATH` | `--json` | The handlers that apply to one file (root-relative or absolute), each with the folder whose `.tfsfunctions.yaml` contributed it; the ones an `exclude` suppressed and why; the `tagged` defaults and who took them over. |
 | `tfs migrate` | `--apply`, `--rename` | Turn a 0.3.x root's `@@func__arg` folder names into `.tfsfunctions.yaml` files, typed from the handlers' signatures. A dry run unless `--apply`; `--rename` (its own dry run) is the separate second step that strips the markers from the folder names. |
+| `tfs ui` | `--open` | Print the web UI's address with the token in the URL fragment (`http://<bind>:<port>/ui/#token=…`); `--open` opens it in the browser. Needs the daemon; warns when `Frontend/dist` is not built. |
 | `tfs reload` | | Re-read `config.toml` and every `.tfsfunctions.yaml`, re-import every add-on and reconcile, in the running daemon. `[daemon] bind`/`port` take effect at the next `start`. |
 | `tfs start` | `-d/--detach`, `--force` | Reconcile, then watch, logging to `[logging] file`. `-d` detaches (the child's own output, i.e. a crash, lands in `.tfs/daemon.out`) and returns once the control channel answers. `--force` takes over a lock left by a daemon that is gone or on another host, never one held by a live local process. |
 | `tfs stop` | `--timeout SEC` | Stop gracefully; falls back to signalling the pid in `.tfs/lock` when the daemon does not answer, only for a lock written on this host. Default wait: `stop_timeout_seconds + 5`. |
@@ -138,7 +143,7 @@ or activate the virtual environment once and call `tfs` directly. `--root DIR`
 | `tfs upgrade` | `--to TAG`, `--dry-run`, `-y/--yes`, `--skip-tests`, `--wait SEC` | Move the checkout to the newest release tag (or `--to`), snapshot every root, run the suite, restart the daemons, revert on failure. `--yes` consents to a schema change; `--wait` is how long to let in-flight runs finish first. |
 | `tfs backup list` | `--json` | The snapshots in `.tfs/backups/`, newest first, with size and origin tag. |
 | `tfs backup prune` | `--keep N` (default 3), `--dry-run`, `-y/--yes` | Delete all but the newest `N` snapshots; asks first unless `--yes`. |
-| `tfs --version` | | `0.4.0 (abc1234)`: the version in `pyproject.toml` and the commit of the checkout. |
+| `tfs --version` | | `0.5.0 (abc1234)`: the version in `pyproject.toml` and the commit of the checkout. |
 
 Exit status is `0` on success and `1` on any error (no root, no daemon
 where one is needed, a refused lock, a failed check). `tfs query` exits
@@ -259,6 +264,47 @@ def up(ctx):                                    # (@action.on_stop() when it goe
   parameters)`: editing a script does not re-run old files, changing an
   entry's parameters (and reloading) does.
 
+## Web UI
+
+A read-only dashboard the daemon serves at `/ui/`
+([`DESIGN/v0-5-0.md`](DESIGN/v0-5-0.md)). Build it once per checkout —
+`tfs upgrade` rebuilds it for you whenever `npm` is on PATH:
+
+```bash
+cd Frontend && npm ci && npm run build && cd ..   # Node 20+; produces Frontend/dist
+uv run tfs ui --open                              # http://127.0.0.1:7411/ui/#token=… — and opens it
+```
+
+The token rides in the URL fragment, which a browser never sends: the page
+keeps it for the tab and sends it as a bearer on every request, so the
+daemon's log never sees it. Without a build the daemon answers `503 UI not
+built` at `/ui/` and `tfs ui` warns; a build that lands while the daemon
+runs is served at once, no restart. A daemon bound to `0.0.0.0` exposes the
+static shell of the UI without a token, and nothing else.
+
+What it shows: **Status** (version, add-ons, runs in flight, upgrades),
+**Files** (by tag, name and folder; paged), one **File** (its tags, what
+applies to it and why, its history), **Runs** and one **Run** (arguments,
+result, trace, what it produced, its problems), **Problems**, **Add-ons**
+and **Functions** (every loaded `.tfsfunctions.yaml`). Nothing on it
+changes state: reload, retry and stop stay with the CLI.
+
+Everything it shows comes from the versioned JSON API the daemon serves at
+`/api/v1/...` with the same bearer token — `status`, `files`, `file`,
+`file/history`, `file/explain`, `tags`, `runs`, `run`, `problems`,
+`problem`, `addons`, `functions`, `upgrades`; `GET` only, lists are paged
+(`limit`, `offset`, `total`), errors are `{"error": ...}`. A script needs no
+more than:
+
+```bash
+curl -H "Authorization: Bearer $(cat .tfs/token)" http://127.0.0.1:7411/api/v1/status
+```
+
+For work on the UI itself, `npm run dev` in `Frontend/` serves it with
+`/api` proxied to the daemon (`TFS_DAEMON` overrides the address); open the
+address `tfs ui` prints with the dev server's origin in place of the
+daemon's.
+
 ## Root layout
 
 ```
@@ -274,11 +320,14 @@ def up(ctx):                                    # (@action.on_stop() when it goe
   ...                  your files
 ```
 
-The daemon exposes a small HTTP API on `[daemon] bind:port` (default
-`127.0.0.1:7411`), authenticated with the token: `/health` (which reports
-the version and commit the daemon runs), `/stop`, `/reload`, `/actions`,
-`/files`, `/explain`. In Docker, set `bind = "0.0.0.0"` and map the port;
-mount the root as a volume.
+The daemon exposes an HTTP API on `[daemon] bind:port` (default
+`127.0.0.1:7411`), authenticated with the token: the CLI's own endpoints
+(`/health`, which reports the version and commit the daemon runs, `/stop`,
+`/reload`, `/actions`, `/files`, `/explain`) and the versioned, read-only
+`/api/v1/...` the web UI and scripts use (see [Web UI](#web-ui)); `/ui/`
+serves the built dashboard without a token — static files, nothing else.
+In Docker, set `bind = "0.0.0.0"` and map the port; mount the root as a
+volume.
 
 ## Self-update
 
@@ -310,9 +359,12 @@ sequence, per [`DESIGN/v0-2-0.md`](DESIGN/v0-2-0.md):
    here on nothing is imported from the checkout being replaced.
 3. Mark every root's `.tfs/lock`, stop the daemons, snapshot every database
    (`VACUUM INTO .tfs/backups/<utc>-<from-tag>.db`).
-4. `git checkout <tag>`, `uv sync`, run the test suite (`--skip-tests` skips
-   the suite and nothing else), start the daemons, and check that `/health`
-   reports the target's commit — the hash, not the version string, decides.
+4. `git checkout <tag>`, `uv sync`, build the web UI (`npm ci && npm run
+   build` in `Frontend/` — a warning in the report, never a failure, when
+   `npm` is missing or the build fails: the daemon works without it), run
+   the test suite (`--skip-tests` skips the suite and nothing else), start
+   the daemons, and check that `/health` reports the target's commit — the
+   hash, not the version string, decides.
 5. Record the upgrade in every root's `upgrades` table, keep the newest 3
    snapshots per root, and offer to delete this upgrade's snapshots (they
    are kept unless you say `y`).
@@ -340,16 +392,23 @@ refreshes it.
 uv run pytest -q                # tests (each test gets its own temporary root)
 uv run ty check src tests       # type check
 uv run ruff format src tests    # format (CI runs it with --check)
+
+cd Frontend && npm ci           # the web UI (Node 20+), once per checkout
+npm run lint && npm test        # tsc + eslint; vitest
+npm run build                   # Frontend/dist: what the daemon serves at /ui/
+npm run dev                     # dev server, /api proxied to the daemon (TFS_DAEMON overrides)
 ```
 
-All three run in CI on every push and pull request
+The Python checks run in CI on every push and pull request
 ([`.github/workflows/test.yml`](.github/workflows/test.yml)), on Linux and
 Windows against Python 3.12 and 3.13, followed by a smoke test that inits a
-root, starts the daemon, queries it and stops it. The self-update sequence
-is exercised on both platforms against a fake checkout and fake `uv` /
-`pytest` / daemon stand-ins (`tests/test_upgrade.py`), including the revert
-of code and database after a failed start. The suite points the root
-registry at a temporary file through `TFS_REGISTRY`.
+root, starts the daemon, queries it, checks the API and `/ui/` before
+(`503`) and after (`200`) a build, and stops it; a `frontend` job lints,
+format-checks, tests and builds `Frontend/` on Node 22. The self-update
+sequence is exercised on both platforms against a fake checkout and fake
+`uv` / `pytest` / `npm` / daemon stand-ins (`tests/test_upgrade.py`),
+including the revert of code and database after a failed start. The suite
+points the root registry at a temporary file through `TFS_REGISTRY`.
 
 Linting/formatting is configured for [Trunk](https://trunk.io) (ruff, black,
 isort, bandit, markdownlint, prettier) in `.trunk/trunk.yaml`. Every source
@@ -374,5 +433,7 @@ approved design for that release — [`v0-1-0.md`](DESIGN/v0-1-0.md) is what
 0.1.0 shipped, [`v0-2-0.md`](DESIGN/v0-2-0.md) is self-update, shipped in
 0.2.0, [`v0-3-0.md`](DESIGN/v0-3-0.md) is the `on_start` / `on_stop` hooks,
 shipped in 0.3.0, [`v0-4-0.md`](DESIGN/v0-4-0.md) moves functions out of
-names into `.tfsfunctions.yaml`, shipped in 0.4.0. Releases are annotated
-tags `vA.B.C` on `origin`; that is what `tfs update` looks for.
+names into `.tfsfunctions.yaml`, shipped in 0.4.0,
+[`v0-5-0.md`](DESIGN/v0-5-0.md) is the versioned API and the read-only web
+UI, shipped in 0.5.0. Releases are annotated tags `vA.B.C` on `origin`; that
+is what `tfs update` looks for.
