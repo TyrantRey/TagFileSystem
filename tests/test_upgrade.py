@@ -48,7 +48,8 @@ class Stage:
         monkeypatch.setenv("TFS_FAKE_SCENARIO", str(self.scenario_path))
         self.save()
         self.commands = {
-            name: [sys.executable, FAKE, name] for name in ("uv", "tfs", "pytest")
+            name: [sys.executable, FAKE, name]
+            for name in ("uv", "tfs", "pytest", "npm")
         }
 
     def save(self) -> None:
@@ -94,6 +95,16 @@ class Stage:
 
     def syncs(self) -> int:
         return len([c for c in self.calls("uv") if c["args"][:1] == ["sync"]])
+
+    def builds(self) -> list[str]:
+        """Every npm call as ``ci`` / ``run build``, all made in Frontend/."""
+        calls = self.calls("npm")
+        assert all(Path(c["cwd"]) == self.repo.path / "Frontend" for c in calls)
+        return [" ".join(c["args"][:2]) for c in calls]
+
+    def built(self) -> str | None:
+        index = self.repo.path / "Frontend" / "dist" / "index.html"
+        return index.read_text(encoding="utf-8") if index.exists() else None
 
     def db_version(self) -> int:
         return updater.read_user_version(self.root.db_path)
@@ -257,6 +268,8 @@ def test_successful_upgrade_records_restarts_and_prunes(stage: Stage):
     assert health["hash"] == stage.repo.tags["v1.0.0"] and health["version"] == "1.0.0"
     assert stage.starts() == [("old", "ok"), ("new", "ok")]
     assert stage.syncs() == 1 and len(stage.calls("pytest")) == 2  # --version, -q
+    assert stage.builds() == ["ci --no-audit", "run build"]  # the web UI, once
+    assert stage.built() == "new"
 
     (record,) = stage.upgrades()
     assert (record.from_tag, record.from_hash) == ("v0.9.0", stage.repo.tags["v0.9.0"])
@@ -300,6 +313,55 @@ def test_in_flight_runs_block_the_preflight(stage: Stage):
         stage.plan(wait=0)
     assert stage.repo.marker() == "old"
     assert stage.starts() == [("old", "ok")]
+
+
+def test_a_failed_frontend_build_is_a_warning_not_a_failure(
+    stage: Stage, capsys: pytest.CaptureFixture
+):
+    """DESIGN/v0-5-0.md §4.3: the daemon works without the UI, so a build
+    that fails neither stops the upgrade nor reverts it."""
+    stage.set(npm_fail=["new"])
+    stage.start_old_daemon()
+
+    code = updater.run_plan(stage.plan())
+
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "warning: the web UI was not built (npm ci" in out
+    assert "failing on purpose" in out and "npm ci && npm run build" in out
+    assert "upgraded to 1.0.0" in out and "with 1 warning(s)" in out
+    assert stage.repo.marker() == "new" and stage.built() is None
+    assert stage.starts() == [("old", "ok"), ("new", "ok")]
+    assert len(stage.upgrades()) == 1
+
+
+def test_missing_npm_is_a_warning(stage: Stage, capsys: pytest.CaptureFixture):
+    stage.commands["npm"] = ["no-such-npm-binary-here"]
+    stage.start_old_daemon()
+
+    code = updater.run_plan(stage.plan())
+
+    out = capsys.readouterr().out
+    assert code == 0, out
+    assert "warning: npm is not on PATH: the web UI was not built" in out
+    assert "with 1 warning(s)" in out
+    assert stage.calls("npm") == [] and stage.built() is None
+    assert stage.repo.marker() == "new"
+
+
+def test_a_revert_rebuilds_the_previous_frontend(
+    stage: Stage, capsys: pytest.CaptureFixture
+):
+    stage.set(pytest_exit=1)
+    stage.start_old_daemon()
+
+    code = updater.run_plan(stage.plan())
+
+    assert code == 1, capsys.readouterr().out
+    assert stage.repo.marker() == "old"
+    # built for the new code, then again for the old one after the revert
+    assert stage.builds() == ["ci --no-audit", "run build"] * 2
+    assert stage.built() == "old"
 
 
 def test_nothing_to_do_at_the_latest_tag(stage: Stage):

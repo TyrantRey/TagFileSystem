@@ -309,6 +309,22 @@ def test_reconcile_is_idempotent_and_notices_missing_files(root: Root, daemon: D
     assert daemon.backend.query_file(b) is not None
 
 
+def test_files_produced_during_a_reconcile_are_not_retired(root: Root, daemon: Daemon):
+    """``out/`` did not exist when the walk listed the root, so the copy the
+    run makes is never walked: it is still not gone, nor a move of its
+    source (its hash is the source's)."""
+    daemon.startup()
+    write(root, "copy/a.txt", "A")
+
+    report = daemon.reconcile()
+
+    assert report.moved == [] and report.removed == []
+    assert daemon.backend.query_file("out/a.txt.bak") is not None
+    again = daemon.reconcile()
+    assert again.moved == [] and again.removed == []
+    assert "out/a.txt.bak" in {i.file.path.as_posix() for i in again.indexed}
+
+
 # ---------------------------------------------------------- configuration
 
 
@@ -702,7 +718,7 @@ def test_the_lock_records_the_control_port(root: Root, tmp_path: Path):
     Config(daemon=DaemonConfig(port=port, stop_timeout_seconds=0.5)).write(
         root.config_path
     )
-    daemon = Daemon(root, control=True)
+    daemon = Daemon(root, control=True, ui_dir=root.path.parent / "no-dist")
     daemon.startup()
     try:
         holder = Lock(root).holder()

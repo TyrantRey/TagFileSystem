@@ -64,8 +64,8 @@ def root(tmp_path: Path) -> Root:
 
 
 @pytest.fixture
-def daemon(root: Root):
-    d = Daemon(root, control=True, poll_ms=50)
+def daemon(root: Root, tmp_path: Path):
+    d = Daemon(root, control=True, poll_ms=50, ui_dir=tmp_path / "no-dist")
     d.startup()
     thread = threading.Thread(target=d.run_forever, daemon=True)
     thread.start()
@@ -307,7 +307,7 @@ def test_stop_is_graceful_for_an_ipv6_daemon(root: Root):
     Config(daemon=DaemonConfig(bind="::1", port=port, stop_timeout_seconds=0.5)).write(
         root.config_path
     )
-    d = Daemon(root, control=True, poll_ms=50)
+    d = Daemon(root, control=True, poll_ms=50, ui_dir=root.path.parent / "no-dist")
     d.startup()
     thread = threading.Thread(target=d.run_forever, daemon=True)
     thread.start()
@@ -415,3 +415,35 @@ def test_start_foreground_runs_until_stopped(root: Root):
     assert box["result"].exit_code == 0, box["result"].output
     assert "watching" in box["result"].output and "stopped" in box["result"].output
     assert not root.lock_path.exists()
+
+
+# ---------------------------------------------------------------------- ui
+
+
+def test_ui_prints_the_address_with_the_token_in_the_fragment(
+    root: Root, daemon: Daemon, monkeypatch: pytest.MonkeyPatch
+):
+    import webbrowser
+
+    opened: list[str] = []
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
+    config = root.load_config()
+
+    result = tfs("ui", "--root", str(root.path))
+
+    assert result.exit_code == 0, result.output
+    url = f"http://127.0.0.1:{config.daemon.port}/ui/#token={root.read_token()}"
+    assert url in result.output
+    assert "not built" in result.output  # the fixture's daemon has no dist
+    assert opened == []
+
+    result = tfs("ui", "--root", str(root.path), "--open")
+    assert result.exit_code == 0, result.output
+    assert opened == [url]
+
+
+def test_ui_needs_a_daemon(root: Root):
+    result = tfs("ui", "--root", str(root.path))
+
+    assert result.exit_code == 1
+    assert "no daemon answers" in result.output and "tfs start -d" in result.output

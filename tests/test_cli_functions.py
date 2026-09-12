@@ -95,8 +95,8 @@ def root(tmp_path: Path) -> Root:
 
 
 @pytest.fixture
-def daemon(root: Root):
-    d = Daemon(root, control=True, poll_ms=50)
+def daemon(root: Root, tmp_path: Path):
+    d = Daemon(root, control=True, poll_ms=50, ui_dir=tmp_path / "no-dist")
     d.startup()
     thread = threading.Thread(target=d.run_forever, daemon=True)
     thread.start()

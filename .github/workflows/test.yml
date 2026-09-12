@@ -54,8 +54,16 @@ jobs:
       - name: Test
         run: uv run pytest -q --durations=10
 
+      - name: Install Node (for the web UI's build in the smoke test)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+
       # The console script, a real root and a real daemon: the parts the
-      # unit tests exercise in-process.
+      # unit tests exercise in-process. Then the API and the web UI
+      # (DESIGN/v0-5-0.md): 503 before the build, 200 after it, no restart.
       - name: Smoke test the tfs command
         shell: bash
         run: |
@@ -71,6 +79,20 @@ jobs:
           uv run tfs --root "$root" start -d
           uv run tfs --root "$root" list
           uv run tfs --root "$root" backup list
+
+          port=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['port'])" "$root/.tfs/lock")
+          token=$(cat "$root/.tfs/token")
+          base="http://127.0.0.1:$port"
+          status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          test "$(status "$base/ui/")" = 503
+          curl -s "$base/ui/" | grep -q "UI not built"
+          test "$(status "$base/api/v1/status")" = 401
+          curl -sf -H "Authorization: Bearer $token" "$base/api/v1/status" | grep -q '"built": false'
+          (cd Frontend && npm ci --no-audit --no-fund && npm run build)
+          test "$(status "$base/ui/")" = 200
+          curl -s "$base/ui/" | grep -qi "<!doctype html"
+          curl -sf -H "Authorization: Bearer $token" "$base/api/v1/status" | grep -q '"built": true'
+          uv run tfs --root "$root" ui | grep -q "/ui/#token="
           # `upgrade` is dispatched by the stdlib shim; --help must work
           # without a checkout state the preflight would accept.
           uv run tfs upgrade --help | grep -q "usage: tfs upgrade"
@@ -97,3 +119,24 @@ jobs:
 
           uv run tfs --root "$root" stop
           test ! -f "$root/.tfs/lock"
+
+  frontend:
+    # The web UI on its own: lint, format, unit tests, a production build.
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run build
