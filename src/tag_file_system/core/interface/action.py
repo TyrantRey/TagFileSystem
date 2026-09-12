@@ -137,14 +137,18 @@ def canonical_json(value: Any) -> str:
 
 
 class ActionRecord(BaseModel):
-    """One loaded add-on version: ``(name, script_hash)`` is unique."""
+    """One loaded add-on version: ``(name, script_hash)`` is unique.
+
+    ``signature`` and ``hooks`` are keyed by handler name (DESIGN/v0-4-0.md
+    §5): one script carries several individually addressed handlers.
+    """
 
     id: str
     name: str
     script_path: PurePosixPath
     script_hash: str
-    signature: dict[str, Any]  # JSON Schema of the handler's args
-    hooks: list[Hook]
+    signature: dict[str, Any]  # {handler: JSON Schema of its args}
+    hooks: dict[str, list[Hook]]  # {handler: hooks it is marked with}
     loaded_at: datetime
 
 
@@ -158,6 +162,7 @@ class RunKey(BaseModel):
 
     file_hash: str
     action_name: str
+    handler: str = ""  # the function's name inside the script; '' before schema 3
     hook: Hook
     args: dict[str, Any] = Field(default_factory=dict)
 
@@ -173,8 +178,14 @@ class RunKey(BaseModel):
     def args_json(self) -> str:
         return canonical_json(self.args)
 
-    def _identity(self) -> tuple[str, str, str, str]:
-        return (self.file_hash, self.action_name, self.hook.value, self.args_json)
+    def _identity(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.file_hash,
+            self.action_name,
+            self.handler,
+            self.hook.value,
+            self.args_json,
+        )
 
     def __hash__(self) -> int:
         return hash(self._identity())
@@ -187,10 +198,11 @@ class RunRecord(BaseModel):
     id: str
     action_id: str
     action_name: str
+    handler: str = ""
     hook: Hook
     file_id: str | None
     file_hash: str
-    slug: str
+    slug: str  # display text, e.g. ``photo.resize(width=800)``; never parsed
     args: dict[str, Any]
     result: Any = None
     status: RunStatus
@@ -210,6 +222,7 @@ class RunRecord(BaseModel):
         return RunKey(
             file_hash=self.file_hash,
             action_name=self.action_name,
+            handler=self.handler,
             hook=self.hook,
             args=self.args,
         )

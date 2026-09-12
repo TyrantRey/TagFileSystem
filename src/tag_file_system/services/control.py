@@ -5,7 +5,7 @@
 A small JSON-over-HTTP server bound to ``[daemon] bind:port``, every request
 authenticated with ``Authorization: Bearer <.tfs/token>``. It is the seed of
 the later API/MCP: ``/health``, ``/stop``, ``/reload``, ``/actions``,
-``/files``. ``ControlClient`` is what the ``tfs`` CLI talks to.
+``/files``, ``/explain``. ``ControlClient`` is what the ``tfs`` CLI talks to.
 """
 
 import ipaddress
@@ -18,13 +18,14 @@ import urllib.request
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Callable
 
 from tag_file_system.core.interface.action import RunRecord
 from tag_file_system.core.interface.file_metadata import TaggedFile
 from tag_file_system.core.logger import logger
 from tag_file_system.core.paths import has_parent_reference, is_anchored, posix_key
+from tag_file_system.root import FUNCTIONS_FILE, same_name
 from tag_file_system.version import COMMIT, VERSION
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -257,6 +258,7 @@ class ControlServer:
             ("POST", "/reload"): self._reload,
             ("GET", "/actions"): self._actions,
             ("GET", "/files"): self._files,
+            ("GET", "/explain"): self._explain,
         }
         handler = routes.get((method, path))
         if handler is None:
@@ -279,12 +281,23 @@ class ControlServer:
         return self.daemon.reload()
 
     def _actions(self, query: dict[str, list[str]]) -> dict[str, Any]:
-        return {
-            "version": VERSION,
-            "hash": COMMIT,
-            "actions": self.daemon.describe_addons(),
-            "problems": self.daemon.load_problems(),
-        }
+        return {"version": VERSION, "hash": COMMIT, **self.daemon.actions_view()}
+
+    def _explain(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        """``tfs explain``: ``?path=<root-relative file>``."""
+        values = query.get("path", [])
+        text = values[0].strip() if values else ""
+        if not text:
+            raise BadRequest("path is required")
+        if is_anchored(text) or has_parent_reference(text):
+            raise BadRequest(f"{text!r} is not a root-relative path")
+        try:
+            key = posix_key(text)
+        except ValueError as e:
+            raise BadRequest(str(e)) from e
+        if same_name(PurePosixPath(key).name, FUNCTIONS_FILE):
+            raise BadRequest(f"{key} is a configuration file, not a data file")
+        return self.daemon.explain(key)
 
     def _files(self, query: dict[str, list[str]]) -> dict[str, Any]:
         first = {k: v[0] for k, v in query.items() if v}
@@ -367,6 +380,10 @@ class ControlClient:
     def actions(self) -> dict[str, Any]:
         """``{"actions": [...], "problems": [...]}``."""
         return self._call("GET", "/actions")
+
+    def explain(self, path: str) -> dict[str, Any]:
+        """What applies to one file and why (DESIGN/v0-4-0.md §9)."""
+        return self._call("GET", "/explain", {"path": path})
 
     def files(
         self,

@@ -33,11 +33,12 @@ from tag_file_system.core.interface.action import (
 )
 from tag_file_system.core.interface.database import OperationResultEnum
 from tag_file_system.core.interface.file_metadata import TaggedFile
-from tag_file_system.core.interface.tag import ParsedPath
 from tag_file_system.core.logger import logger
 from tag_file_system.database.action_store import ActionStore
 from tag_file_system.database.sqlite import SQLiteBackend
+from tag_file_system.functions import FunctionsStore, file_label
 from tag_file_system.root import (
+    FUNCTIONS_FILE,
     SCRIPT_DIR,
     TFS_DIR,
     Lock,
@@ -45,11 +46,13 @@ from tag_file_system.root import (
     OutsideRoot,
     Root,
     Zone,
+    same_name,
 )
 from tag_file_system.services.control import ControlServer
 from tag_file_system.services.file_info import compute_file_hash
 from tag_file_system.services.indexer import Indexed, Indexer
 from tag_file_system.services.tagging import TaggingParser
+from tag_file_system.services.views import DAEMON, actions_view, explain_view
 from tag_file_system.version import COMMIT, VERSION
 
 watchfiles.main.logger.setLevel("WARNING")
@@ -127,14 +130,24 @@ class Daemon:
         self.store = ActionStore(self.backend)
         self.indexer = Indexer(root, self.backend, self.parser)
         self.loader = AddonLoader(root, store=self.store)
+        self.functions = FunctionsStore(
+            root, self.loader, report=self._report_functions_problem
+        )
         self.runner = ActionRunner(
-            root, self.backend, self.store, self.loader, self.config, self.parser
+            root,
+            self.backend,
+            self.store,
+            self.loader,
+            self.config,
+            self.parser,
+            functions=self.functions,
         )
         self.loader.report = self._report_load_problem
         self.lock = Lock(root)
         self._stop = threading.Event()
         self.started = False
         self._lifecycle_started = False  # on_start has had its turn this session
+        self._drifted: set[str] = set()  # folders whose file changed since the load
 
     # ------------------------------------------------------- load problems
 
@@ -162,12 +175,27 @@ class Daemon:
         )
         return self.runner.problem(severity, kind, message, action_name=action_name)
 
+    def _report_functions_problem(
+        self,
+        severity: Severity,
+        kind: str,
+        message: str,
+        /,
+        *,
+        action_name: str | None = None,
+    ) -> object:
+        """A ``.tfsfunctions.yaml`` problem: the store keeps it for ``tfs
+        list``; here it reaches the problem log and the notifiers."""
+        return self.runner.problem(severity, kind, message)
+
     def _load(self, path: Path | None = None) -> list:
         """Load one script (or all) and refresh its recorded problems.
 
         Once the session has started, an add-on that appears (or comes back
         from a failed import) gets its ``on_start`` here; the run key makes
-        that a no-op for the add-ons that already had theirs.
+        that a no-op for the add-ons that already had theirs. The
+        configuration is re-validated: an entry binds or unbinds with the
+        script it names.
         """
         if path is None:
             self._load_problems.clear()
@@ -176,12 +204,52 @@ class Daemon:
             self._load_problems.pop(path.name, None)
             addon = self.loader.load(path)
             loaded = [addon] if addon is not None else []
+        self.functions.rebind()
         if self._lifecycle_started:
             self.runner.on_lifecycle(Hook.ON_START)
         return loaded
 
+    def actions_view(self) -> dict:
+        """``tfs list`` / ``/actions``: the add-ons and every load problem,
+        built by ``services.views`` — the same way the CLI builds it offline."""
+        script_problems = [
+            p for problems in self._load_problems.values() for p in problems
+        ]
+        return actions_view(self.loader, self.functions, script_problems, DAEMON)
+
     def load_problems(self) -> list[dict]:
-        return [p for problems in self._load_problems.values() for p in problems]
+        """Every load problem ``tfs list`` shows: the scripts' and the
+        configuration files'."""
+        return self.actions_view()["problems"]
+
+    def _folder_key(self, directory: Path) -> str:
+        text = self.root.relative(directory).as_posix()
+        return "" if text == "." else text
+
+    def _drift(self, path: Path) -> None:
+        """A ``.tfsfunctions.yaml`` changed under the watcher: say so once per
+        folder, apply nothing — ``tfs reload`` is the commit (§8)."""
+        folder = self._folder_key(path.parent)
+        if folder in self._drifted:
+            return
+        self._drifted.add(folder)
+        self.runner.problem(
+            Severity.WARN,
+            "functions.drift",
+            f"{file_label(folder)} changed on disk; not applied until `tfs reload`",
+        )
+
+    def explain(self, key: str) -> dict:
+        """``tfs explain``: what applies to one file and why (§9), from the
+        configuration this daemon loaded — what runs."""
+        return explain_view(
+            self.loader,
+            self.functions,
+            key,
+            self.backend.query_file(key),
+            DAEMON,
+            self.parser,
+        )
 
     # ------------------------------------------------------------ lifecycle
 
@@ -237,6 +305,7 @@ class Daemon:
                 )
                 self.control.start()
             self._load()
+            self.functions.load_tree()  # needs the handlers: validation binds
             # The add-ons are up and no file has been looked at yet: an
             # on_start handler prepares what the rest of the session (the
             # replayed problems included) is about to use.
@@ -390,8 +459,10 @@ class Daemon:
 
     def reload(self) -> dict:
         """``tfs reload``: re-read ``config.toml`` (``[logging]`` included when
-        the daemon owns the logging setup) and re-import every add-on.
-        ``[daemon] bind/port`` take effect at the next ``start``."""
+        the daemon owns the logging setup), re-import every add-on, re-read
+        every ``.tfsfunctions.yaml`` and reconcile so a new entry reaches the
+        files it covers (DESIGN/v0-4-0.md §8). ``[daemon] bind/port`` take
+        effect at the next ``start``."""
         try:
             self.config = self.root.load_config()
             self.runner.config = self.config
@@ -410,9 +481,16 @@ class Daemon:
                 Severity.ERR, "config.invalid", f"config.toml not reloaded: {e}"
             )
         loaded = self._load()
+        self._drifted.clear()
+        functions = self.functions.load_tree()
+        self.reconcile()
         return {
             "config": "reloaded" if config_ok else "kept",
             "addons": sorted(a.name for a in loaded),
+            "functions": {
+                "files": len(functions.folders),
+                "problems": functions.problems,
+            },
         }
 
     def describe_addons(self) -> list[dict]:
@@ -445,6 +523,9 @@ class Daemon:
                 continue
             if zone is Zone.TFS:
                 continue
+            if zone is Zone.FUNCTIONS:
+                self._drift(path)
+                continue
             if change is Change.deleted and _exists_exactly(
                 path, self.case_insensitive
             ):
@@ -457,6 +538,7 @@ class Daemon:
             if change is Change.deleted:
                 self._load_problems.pop(path.name, None)
                 self.loader.unload(path)
+                self.functions.rebind()  # its entries are unbound now
             else:
                 self._load(path)
         if data_events:
@@ -505,13 +587,21 @@ class Daemon:
                 continue
             created_hashes.add(indexed.file.file_hash)
             if moved_from is not None:
-                self._moved(moved_from, indexed, source)
-            elif indexed.previous is None:
-                self._fire(indexed, Hook.ADDED, source)
-            elif indexed.content_changed or indexed.new_tags:
+                # The row as it was: old key, old tags — the scope it left.
+                self.runner.on_transition(
+                    path,
+                    indexed.file,
+                    moved_from,
+                    content_changed=False,
+                    source=source,
+                )
+            elif (
+                indexed.previous is None or indexed.content_changed or indexed.new_tags
+            ):
                 # "added" for a path we already know (an atomic save, a
-                # write-tmp-and-rename editor): that is a modification.
-                self._fire(indexed, Hook.MODIFIED, source)
+                # write-tmp-and-rename editor) is a modification; the runner
+                # tells the two apart by the row that was there.
+                self._fire(indexed, source)
             else:
                 continue
             self._observe(indexed.file.path.as_posix(), in_flight_before)
@@ -522,14 +612,13 @@ class Daemon:
             indexed = self._index(path)
             if indexed is None:
                 continue
-            hook = Hook.ADDED if indexed.previous is None else Hook.MODIFIED
             if (
-                hook is Hook.MODIFIED
+                indexed.previous is not None
                 and not indexed.content_changed
                 and not indexed.new_tags
             ):
                 continue  # touched, unchanged: nothing to do
-            self._fire(indexed, hook, source)
+            self._fire(indexed, source)
             self._observe(indexed.file.path.as_posix(), in_flight_before)
 
         for row in gone.values():
@@ -543,7 +632,7 @@ class Daemon:
         """``Indexer.index`` that turns an unreadable file into a problem
         instead of a dead daemon (a file mid-copy is routine on Windows)."""
         try:
-            return self.indexer.index(path, **kwargs)
+            indexed = self.indexer.index(path, **kwargs)
         except OSError as e:
             self.runner.problem(
                 Severity.ERR,
@@ -552,6 +641,9 @@ class Daemon:
                 file_path=path,
             )
             return None
+        if indexed is not None:
+            self.runner.report_parse_problems(indexed.parsed, path)
+        return indexed
 
     def _rows_for_deleted(self, path: Path) -> list[TaggedFile]:
         try:
@@ -592,44 +684,21 @@ class Daemon:
 
     # ------------------------------------------------------------ dispatch
 
-    def _fire(self, indexed: Indexed, hook: Hook, source: RunSource) -> None:
-        path = indexed.file.original_path
-        for tag in indexed.new_tags:
-            self.runner.on_tag(path, indexed.file, tag, source=source)
-        self.runner.on_file(hook, path, indexed.file, indexed.parsed, source=source)
-
-    def _moved(self, old: TaggedFile, indexed: Indexed, source: RunSource) -> None:
-        old_parsed = self.parser.parse_path(old.path)
-        left = [c for c in old_parsed.actions if c not in indexed.parsed.actions]
-        if left:
-            self.runner.on_file(
-                Hook.REMOVED,
-                old.original_path,
-                old,
-                ParsedPath(path=old.path, tags=old_parsed.tags, actions=left),
-                source=source,
-                moved=True,
-            )
-        before = {t.name for t in old.tags}
-        for tag in indexed.file.tags:
-            if tag.name not in before:
-                self.runner.on_tag(
-                    indexed.file.original_path, indexed.file, tag.name, source=source
-                )
-        self.runner.on_file(
-            Hook.ADDED,
+    def _fire(self, indexed: Indexed, source: RunSource, rescope: bool = False) -> None:
+        """Hand a freshly indexed file to the runner, with the row it replaced:
+        the runner works out added / modified / removed from the scope diff
+        (DESIGN/v0-4-0.md §6)."""
+        self.runner.on_transition(
             indexed.file.original_path,
             indexed.file,
-            indexed.parsed,
+            indexed.previous,
+            content_changed=indexed.content_changed,
             source=source,
+            rescope=rescope,
         )
 
     def _removed(self, row: TaggedFile, moved: bool, source: RunSource) -> None:
-        parsed = self.parser.parse_path(row.path)
-        if parsed.actions:
-            self.runner.on_file(
-                Hook.REMOVED, row.original_path, row, parsed, source=source, moved=moved
-            )
+        self.runner.on_removed(row, moved=moved, source=source)
 
     def _in_flight(self) -> list[RunHandle]:
         with self.runner._lock:
@@ -709,6 +778,12 @@ class Daemon:
             )
             for name in sorted(files):
                 path = here / name
+                if same_name(name, FUNCTIONS_FILE):
+                    # Configuration, not data: read at start and reload; a
+                    # file that differs from what was loaded is drift.
+                    if not self.functions.is_current(self._folder_key(here), path):
+                        self._drift(path)
+                    continue
                 indexed = self._index(path)
                 if indexed is None:
                     if path.is_file():
@@ -716,12 +791,9 @@ class Daemon:
                     continue
                 seen.add(indexed.file.path.as_posix())
                 report.indexed.append(indexed)
-                hook = (
-                    Hook.MODIFIED
-                    if indexed.previous is not None and indexed.content_changed
-                    else Hook.ADDED
-                )
-                self._fire(indexed, hook, source)
+                # Every entry in scope is offered again (rescope): the run key
+                # makes finished work a no-op and a new entry reaches the file.
+                self._fire(indexed, source, rescope=True)
                 if indexed.previous is None or indexed.content_changed:
                     self._observe(indexed.file.path.as_posix(), in_flight)
 
@@ -743,6 +815,11 @@ class Daemon:
             if any(
                 os.path.normcase(p) == os.path.normcase(TFS_DIR) for p in row.path.parts
             ):
+                continue
+            if same_name(row.path.name, FUNCTIONS_FILE):
+                # A 0.3.x daemon indexed the configuration file as data;
+                # retire the row quietly, no handler ever applied to it.
+                self.backend.delete(row.path)
                 continue
             self.backend.delete(row.path)
             moved = row.file_hash in fresh_hashes

@@ -1,8 +1,10 @@
 # Code by AkinoAlice@TyrantRey
 
-"""The ``tfs`` command (DESIGN/v0-1-0.md §8, DESIGN/v0-2-0.md §4).
+"""The ``tfs`` command (DESIGN/v0-1-0.md §8, DESIGN/v0-2-0.md §4,
+DESIGN/v0-4-0.md §9–§10).
 
     tfs init [dir]      tfs list      tfs query -t a -t b ...
+    tfs explain PATH    tfs migrate [--apply] [--rename]
     tfs reload          tfs start [-d] [--force]      tfs stop
     tfs update [--json]                tfs upgrade [--to TAG] [--dry-run] ...
     tfs backup list | prune [--keep N] tfs --version
@@ -25,7 +27,7 @@ import socket
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated, Any
 
 import typer
@@ -36,20 +38,30 @@ from tag_file_system.core.interface.action import Severity
 from tag_file_system.core.logger import configure_logging
 from tag_file_system.core.paths import has_parent_reference, is_anchored, posix_key
 from tag_file_system.root import (
+    FUNCTIONS_FILE,
     Lock,
     LockHeld,
     LockInfo,
     NotARoot,
+    OutsideRoot,
     Root,
     RootError,
     RootExists,
     pid_alive,
+    same_name,
 )
 from tag_file_system.services.control import (
     ControlClient,
     ControlError,
     ControlUnavailable,
     file_payload,
+)
+from tag_file_system.services.views import (
+    DAEMON,
+    DISK,
+    actions_view,
+    explain_view,
+    load_root,
 )
 from tag_file_system.updater import (
     KEEP_DEFAULT,
@@ -83,6 +95,21 @@ RootOption = Annotated[
 ]
 
 STOP_GRACE_SECONDS = 5.0  # on top of the daemon's own stop_timeout_seconds
+
+# What `tfs init` writes at the root: valid as it is, and says how to go on.
+FUNCTIONS_SKELETON = f"""# {FUNCTIONS_FILE} — the handlers that apply to this folder and everything
+# below it (DESIGN/v0-4-0.md). Read at `tfs start` and `tfs reload`; edits are
+# not applied live. Any folder may carry one; they add up, parent first.
+version: 1
+functions: {{}}
+# functions:
+#   photo:              # script/photo.py
+#     resize:           # def resize(path, metadata, ctx, width: int)
+#       width: 800
+#       exclude:            # skip a file when any of these holds (any/all/not nest)
+#         - tag: draft
+#         - filename: "*.tmp"
+"""
 
 
 def _fail(message: str, code: int = 1) -> typer.Exit:
@@ -261,7 +288,8 @@ def init(
         Path, typer.Argument(help="Folder to turn into a root.")
     ] = Path("."),
 ) -> None:
-    """Turn a folder into a managed root (creates .tfs/ and script/)."""
+    """Turn a folder into a managed root (creates .tfs/, script/ and a
+    .tfsfunctions.yaml skeleton)."""
     try:
         root = Root.init(directory)
     except (RootExists, RootError) as e:
@@ -271,10 +299,14 @@ def init(
     backend = SQLiteBackend()
     backend.init_database(root.db_path, root_dir=root.path)
     backend.close()
+    functions = root.path / FUNCTIONS_FILE
+    if not functions.exists():  # a data file, not layout: never overwritten
+        functions.write_text(FUNCTIONS_SKELETON, encoding="utf-8")
     register_root(root.path)
     typer.echo(f"Initialized TagFileSystem root at {root.path}")
-    typer.echo(f"  add-ons: {root.script_dir}")
-    typer.echo(f"  config:  {root.config_path}")
+    typer.echo(f"  add-ons:   {root.script_dir}")
+    typer.echo(f"  config:    {root.config_path}")
+    typer.echo(f"  functions: {functions}")
 
 
 # ------------------------------------------------------------------ list
@@ -306,15 +338,18 @@ def list_addons(
         busy = _upgrade_in_progress(holder)
         if busy is not None:
             raise _fail(f"{busy}; the root is not available until it finishes")
-        loader = AddonLoader(
-            where,
-            report=lambda severity, kind, message, *, action_name=None: problems.append(
+
+        script_problems: list[dict[str, Any]] = []
+
+        def report(severity, kind, message, *, action_name=None):
+            script_problems.append(
                 {"severity": Severity(severity).value, "kind": kind, "message": message}
-            ),
-        )
-        loader.load_all()
-        actions = [addon.describe() for _, addon in sorted(loader.addons.items())]
-        source = f"script/ (no daemon running: {reason})"
+            )
+
+        loader, functions = load_root(where, report)
+        view = actions_view(loader, functions, script_problems, DISK)
+        actions, problems = view["actions"], view["problems"]
+        source = f"script/ and the {FUNCTIONS_FILE} files on disk (no daemon running: {reason})"
 
     if as_json:
         typer.echo(
@@ -335,22 +370,20 @@ def list_addons(
     if not actions:
         typer.echo("  (none)")
     for action in actions:
-        hooks = (
-            ", ".join([*action["hooks"], *(f"on {p}" for p in action["problem_hooks"])])
-            or "-"
-        )
-        typer.echo(f"  {action['name']:<20} {hooks}")
-        signature = action.get("signature") or {}
-        if not isinstance(signature, dict):
-            continue
-        for hook, schema in signature.items():
+        typer.echo(f"  {action['name']:<20} {action.get('script', '')}")
+        for handler in action.get("handlers", []):
+            hooks = ", ".join(handler.get("hooks", [])) or "-"
+            schema = handler.get("signature") or {}
             params = ", ".join(
                 f"{name}: {spec.get('x-tfs-path') or spec.get('type', 'any')}"
                 + (f" = {spec['default']!r}" if "default" in spec else "")
                 for name, spec in schema.get("properties", {}).items()
             )
-            if params:
-                typer.echo(f"      {hook}({params})")
+            lifecycle_only = all(h in ("on_start", "on_stop") for h in handler["hooks"])
+            call = "" if lifecycle_only else f" ({params})"
+            typer.echo(f"      {handler['name']:<16} {hooks}{call}")
+        for severity in action.get("problem_hooks", []):
+            typer.echo(f"      on {severity}")
     for problem in problems:
         typer.echo(f"  [{problem['severity']}] {problem['kind']}: {problem['message']}")
 
@@ -380,7 +413,7 @@ def query(
     ] = None,
     prefix: Annotated[
         str | None,
-        typer.Option("--under", help="Root-relative directory, e.g. @@make_copy"),
+        typer.Option("--under", help="Root-relative directory, e.g. 2024--trip"),
     ] = None,
     deleted: Annotated[
         bool, typer.Option("--deleted", help="Include soft-deleted rows.")
@@ -447,12 +480,206 @@ def query(
             )
 
 
+# --------------------------------------------------------------- explain
+
+
+def _explain_key(where: Root, text: str) -> str:
+    """The root-relative key ``tfs explain`` was given, or exit 2."""
+    if is_anchored(text) or Path(text).is_absolute():
+        try:
+            key = where.relative(Path(text)).as_posix()
+        except OutsideRoot as e:
+            raise _fail(str(e), code=2)
+    else:
+        if has_parent_reference(text):
+            raise _fail(f"{text!r} escapes the root", code=2)
+        try:
+            key = posix_key(text)
+        except ValueError as e:
+            raise _fail(str(e), code=2)
+    if not key or key == ".":
+        raise _fail("explain takes one file, not the root", code=2)
+    if same_name(PurePosixPath(key).name, FUNCTIONS_FILE):
+        raise _fail(f"{key} is a configuration file, not a data file", code=2)
+    return key
+
+
+def _explain_offline(where: Root, key: str) -> dict[str, Any]:
+    """No daemon: the same view, from script/, the .tfsfunctions.yaml files
+    and the database as they are on disk (``services.views``)."""
+    loader, functions = load_root(where)
+    row = None
+    try:
+        backend, _store = _open_backend(where)
+    except typer.Exit:
+        backend = None  # a network mount: the name still says what it can
+    if backend is not None:
+        try:
+            row = backend.query_file(key)
+        finally:
+            backend.close()
+    return explain_view(loader, functions, key, row, DISK)
+
+
+@app.command()
+def explain(
+    path: Annotated[str, typer.Argument(help="One file, root-relative or absolute.")],
+    root: RootOption = None,
+    as_json: Annotated[
+        bool, typer.Option("--json", help="Machine-readable output.")
+    ] = False,
+) -> None:
+    """Which handlers apply to a file, from which folder's .tfsfunctions.yaml,
+    and what excluded the rest (DESIGN/v0-4-0.md §9)."""
+    where = _root(root)
+    key = _explain_key(where, path)
+    holder = Lock(where).holder()
+    reason = None
+    try:
+        payload = _client(where, holder).explain(key)
+    except ControlError as e:
+        reason = _unreachable(e, holder)
+        if reason is None:
+            raise _fail(str(e))
+        busy = _upgrade_in_progress(holder)
+        if busy is not None:
+            raise _fail(f"{busy}; the root is not available until it finishes")
+        payload = _explain_offline(where, key)
+
+    if as_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    if payload.get("source") != DAEMON:
+        typer.echo(
+            f"(no daemon running: {reason}; this is what script/ and the "
+            f"{FUNCTIONS_FILE} files on disk say — what the next start would load)"
+        )
+    tags = ", ".join(payload["tags"]) or "-"
+    origin = "" if payload["known"] else " (from the name; not indexed yet)"
+    typer.echo(f"{payload['path']}    tags{origin}: {tags}")
+    if not payload["applied"]:
+        typer.echo("  (nothing applies)")
+    for entry in payload["applied"]:
+        hooks = ", ".join(entry["hooks"]) or "-"
+        typer.echo(f"  {entry['display']:<44} {hooks:<22} from {entry['file']}")
+    if payload["suppressed"]:
+        typer.echo("suppressed:")
+        for entry in payload["suppressed"]:
+            typer.echo(
+                f"  {entry['display']:<44} from {entry['file']}: excluded by {entry['reason']}"
+            )
+    if payload["defaults"]:
+        typer.echo("tagged defaults:")
+        for entry in payload["defaults"]:
+            name = f"{entry['script']}.{entry['handler']}"
+            by = entry["suppressed_by"]
+            note = f"suppressed by {by}" if by else ""
+            typer.echo(f"  {name:<44} tagged:{entry['tag']:<15} {note}".rstrip())
+    if payload["problems"]:
+        typer.echo("problems:")
+        for problem in payload["problems"]:
+            typer.echo(
+                f"  [{problem['severity']}] {problem['kind']}: {problem['message']}"
+            )
+
+
+# --------------------------------------------------------------- migrate
+
+
+@app.command()
+def migrate(
+    root: RootOption = None,
+    apply: Annotated[
+        bool,
+        typer.Option(
+            "--apply",
+            help="Write the files (with --rename: rename the folders). Default: show the plan.",
+        ),
+    ] = False,
+    rename: Annotated[
+        bool,
+        typer.Option(
+            "--rename",
+            help="Strip the @@ markers from the folder names instead — a separate step, after the files are in place.",
+        ),
+    ] = False,
+) -> None:
+    """Turn v1 `@@func__arg` folder names into .tfsfunctions.yaml files
+    (DESIGN/v0-4-0.md §10). A dry run unless --apply."""
+    from tag_file_system import migrate as migration_module
+
+    where = _root(root)
+    loader = AddonLoader(where)
+    loader.load_all()
+    migration = migration_module.plan(where, loader)
+    holder = Lock(where).holder()
+    if holder is not None and holder.is_live_local():
+        typer.echo(
+            "note: a daemon is running; it reports functions.drift until `tfs reload`",
+            err=True,
+        )
+
+    if rename:
+        if not migration.renames:
+            typer.echo("nothing to rename")
+            _echo_skipped(migration.skipped)
+            raise typer.Exit(1 if apply else 0)
+        typer.echo(
+            f"{'renaming' if apply else 'would rename'} {len(migration.renames)} folder(s):"
+        )
+        for item in migration.renames:
+            typer.echo(f"  {_relative_text(where, item.source)} -> {item.target.name}")
+        _echo_skipped(migration.skipped)
+        if not apply:
+            typer.echo("(dry run: pass --apply to rename)")
+            return
+        done = migration_module.apply_renames(migration)
+        typer.echo(f"renamed {len(done)} folder(s)")
+        return
+
+    if not migration.writes:
+        typer.echo("nothing to migrate: no folder name carries a @@ function")
+        _echo_skipped(migration.skipped)
+        raise typer.Exit(1 if apply else 0)
+    typer.echo(
+        f"{'writing' if apply else 'would write'} {len(migration.writes)} file(s):"
+    )
+    for item in migration.writes:
+        typer.echo(f"  {item.folder}/{FUNCTIONS_FILE}")
+        for line in item.text.splitlines():
+            typer.echo(f"    {line}")
+    _echo_skipped(migration.skipped)
+    if not apply:
+        typer.echo("(dry run: pass --apply to write)")
+        return
+    written = migration_module.apply_writes(migration)
+    typer.echo(
+        f"wrote {len(written)} file(s); `tfs reload` (or `tfs start`) applies them, "
+        "then `tfs migrate --rename` cleans up the names"
+    )
+
+
+def _echo_skipped(skipped: list[str]) -> None:
+    if skipped:
+        typer.echo("skipped:")
+        for line in skipped:
+            typer.echo(f"  {line}")
+
+
+def _relative_text(where: Root, path: Path) -> str:
+    try:
+        return where.relative(path).as_posix()
+    except OutsideRoot:
+        return str(path)
+
+
 # ---------------------------------------------------------------- reload
 
 
 @app.command()
 def reload(root: RootOption = None) -> None:
-    """Re-import the add-ons and re-read config.toml in the running daemon."""
+    """Re-import the add-ons, re-read config.toml and every .tfsfunctions.yaml
+    in the running daemon."""
     where = _root(root)
     holder = Lock(where).holder()
     try:
@@ -469,8 +696,10 @@ def reload(root: RootOption = None) -> None:
                 f"cannot reach the daemon holding this root (pid {holder.pid}): {reason}"
             )
         raise _fail(f"{reason}; is the daemon running? (`tfs start`)")
+    functions = result.get("functions", {"files": 0, "problems": 0})
     typer.echo(
-        f"config {result['config']}; add-ons: {', '.join(result['addons']) or '(none)'}"
+        f"config {result['config']}; add-ons: {', '.join(result['addons']) or '(none)'}; "
+        f"functions: {functions['files']} file(s), {functions['problems']} problem(s)"
     )
 
 
@@ -508,9 +737,11 @@ def start(
         _start_detached(where, config, force)
         return
 
-    configure_logging(
-        config.logging.level, where.path / config.logging.file, stream=False
-    )
+    log_file = where.path / config.logging.file
+    configure_logging(config.logging.level, log_file, stream=False)
+    # The log goes to the file, not to this console: say so where someone
+    # will look — which, detached, is .tfs/daemon.out.
+    typer.echo(f"logging to {log_file}")
     from tag_file_system.services.daemon import Daemon
 
     daemon = Daemon(where, config=config, control=True, apply_logging=True)
@@ -604,7 +835,9 @@ def _start_detached(where: Root, config: Config, force: bool) -> None:
                 else "starting: reconciling the root"
             )
             typer.echo(
-                f"daemon started in the background (pid {pid}, {state}); output in {log}"
+                f"daemon started in the background (pid {pid}, {state}); "
+                f"log in {where.path / config.logging.file}, "
+                f"anything it prints (a crash) in {log}"
             )
             return
         time.sleep(0.25)

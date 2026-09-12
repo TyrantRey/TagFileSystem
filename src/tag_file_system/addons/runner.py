@@ -26,15 +26,10 @@ import threading
 import time
 import traceback
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, ClassVar
+from typing import Any, Callable, ClassVar, Sequence
 from uuid import uuid4
 
-from tag_file_system.addons.binding import (
-    BindingError,
-    SignatureError,
-    bind,
-    raw_by_name,
-)
+from tag_file_system.addons.binding import BindingError, bind, check
 from tag_file_system.addons.context import ActionContext, ProblemContext, RunHandle
 from tag_file_system.addons.loader import AddonLoader, FileHandler
 from tag_file_system.config import Config
@@ -52,7 +47,7 @@ from tag_file_system.core.interface.action import (
 )
 from tag_file_system.core.interface.database import OperationResultEnum
 from tag_file_system.core.interface.file_metadata import TaggedFile
-from tag_file_system.core.interface.tag import ActionCall, ParsedPath, normalize_tag
+from tag_file_system.core.interface.tag import ParsedPath, normalize_tag
 from tag_file_system.core.logger import logger
 from tag_file_system.database.action_store import (
     ActionStore,
@@ -60,6 +55,8 @@ from tag_file_system.database.action_store import (
     RunExists,
 )
 from tag_file_system.database.sqlite import SQLiteBackend
+from tag_file_system.functions.model import display
+from tag_file_system.functions.store import Applied, Effective, FunctionsStore
 from tag_file_system.root import TFS_DIR, SCRIPT_DIR, OutsideRoot, Root, Zone
 from tag_file_system.services.indexer import Indexer
 from tag_file_system.services.tagging import TaggingParser
@@ -167,6 +164,7 @@ class ActionRunner:
         config: Config | None = None,
         parser: TaggingParser | None = None,
         max_chain_depth: int = MAX_CHAIN_DEPTH,
+        functions: FunctionsStore | None = None,
     ) -> None:
         self.root = root
         self.backend = backend
@@ -175,6 +173,10 @@ class ActionRunner:
         self.config = config if config is not None else Config()
         self.parser = parser if parser is not None else TaggingParser()
         self.indexer = Indexer(root, backend, self.parser)
+        # The per-folder configuration (DESIGN/v0-4-0.md §3): what fires.
+        self.functions = (
+            functions if functions is not None else FunctionsStore(root, loader)
+        )
         self.max_chain_depth = max_chain_depth
         # This daemon session: the run key of the lifecycle hooks, which have
         # no file to be keyed by (DESIGN/v0-3-0.md §2).
@@ -188,46 +190,66 @@ class ActionRunner:
 
     # ---------------------------------------------------------- entry points
 
+    def scope(self, file: TaggedFile) -> Effective:
+        """What the configuration says about ``file`` as it is now
+        (DESIGN/v0-4-0.md §3.3–§4)."""
+        return self.functions.effective(
+            file.path.as_posix(), [t.name for t in file.tags]
+        )
+
     def on_file(
         self,
         hook: Hook,
         path: Path,
         file: TaggedFile,
-        parsed: ParsedPath,
+        *,
+        entries: Sequence[Applied] | None = None,
         source: RunSource = RunSource.WATCH,
         parent: RunHandle | None = None,
         moved: bool = False,
     ) -> list[RunRecord]:
-        """Run every handler of ``hook`` for every ``@@`` call on the path,
-        parent first. ``moved`` marks a REMOVED event caused by the file
-        leaving the directory rather than being deleted."""
+        """Run ``hook`` of every configured handler in ``entries`` — by
+        default everything in scope for ``file`` — parent first. ``moved``
+        marks a REMOVED event caused by the file leaving scope rather than
+        being deleted. On ADDED the ``tagged`` marks of a configured handler
+        fire too when the file carries their tag: entering scope with the tag
+        on is a trigger (DESIGN/v0-4-0.md §5)."""
         hook = Hook(hook)
-        self._report_parse_problems(parsed, path)
+        if hook is Hook.TAGGED or hook.is_lifecycle:
+            raise ValueError(f"{hook.value} is not a file hook")
         if parent is not None and not self._chain_allowed(
-            parent, f"@@ functions of {self._key_text(path)}", path
+            parent, f"handlers of {self._key_text(path)}", path
         ):
             return []
+        if entries is None:
+            entries = self.scope(file).applied
+        tags = {t.name for t in file.tags}
         runs: list[RunRecord] = []
-        for call in parsed.actions:
-            addon = self.loader.addon_for(call.name)
-            if addon is None:
-                self.problem(
-                    Severity.ERR,
-                    "action.unbound",
-                    f"@@{call.slug}: no add-on script/{call.name}.py is loaded",
-                    action_name=call.name,
-                    file_path=path,
-                )
-                continue
-            for handler in addon.handlers(hook):
+        for applied in entries:
+            entry = applied.entry
+            marks = self.loader.handler_marks(entry.script, entry.handler, hook)
+            if hook is Hook.ADDED:
+                marks = [
+                    *marks,
+                    *(
+                        h
+                        for h in self.loader.handler_marks(
+                            entry.script, entry.handler, Hook.TAGGED
+                        )
+                        if h.spec.tag in tags
+                    ),
+                ]
+            for handler in marks:
                 if hook is Hook.REMOVED and moved and not handler.spec.on_move:
                     continue
+                args: dict[str, Any] = dict(entry.args)
+                if handler.hook is Hook.TAGGED:
+                    args = {"tag": handler.spec.tag, **args}
                 run = self._execute(
                     handler,
-                    hook,
-                    raw_args=call.args,
-                    key_args=None,
-                    slug=call.slug,
+                    handler.hook,
+                    args=args,
+                    slug=display(entry.script, entry.handler, args),
                     path=path,
                     file=file,
                     source=source,
@@ -242,23 +264,30 @@ class ActionRunner:
         path: Path,
         file: TaggedFile,
         tag: str,
+        *,
         source: RunSource = RunSource.WATCH,
         parent: RunHandle | None = None,
     ) -> list[RunRecord]:
-        """Run every ``@action.tagged(tag)`` handler for ``path``."""
+        """The file acquired ``tag``: run every ``@action.tagged(tag)`` handler
+        that applies — the global, argument-free defaults, minus those a folder
+        in the file's chain names (that folder's entry takes over and is run
+        with its parameters instead), DESIGN/v0-4-0.md §5."""
         tag = normalize_tag(tag)
         if parent is not None and not self._chain_allowed(
             parent, f"tag {tag!r} on {self._key_text(path)}", path
         ):
             return []
+        effective = self.scope(file)
         runs: list[RunRecord] = []
         for handler in self.loader.tag_handlers(tag):
+            if (handler.addon.name, handler.name) in effective.named:
+                continue  # configured somewhere above: not a default here
+            args: dict[str, Any] = {"tag": tag}
             run = self._execute(
                 handler,
                 Hook.TAGGED,
-                raw_args=(),
-                key_args={"tag": tag},
-                slug=f"--{tag}",
+                args=args,
+                slug=display(handler.addon.name, handler.name, args),
                 path=path,
                 file=file,
                 source=source,
@@ -266,7 +295,116 @@ class ActionRunner:
             )
             if run is not None:
                 runs.append(run)
+        for applied in effective.applied:
+            entry = applied.entry
+            for handler in self.loader.handler_marks(
+                entry.script, entry.handler, Hook.TAGGED
+            ):
+                if handler.spec.tag != tag:
+                    continue
+                args = {"tag": tag, **entry.args}
+                run = self._execute(
+                    handler,
+                    Hook.TAGGED,
+                    args=args,
+                    slug=display(entry.script, entry.handler, args),
+                    path=path,
+                    file=file,
+                    source=source,
+                    parent=parent,
+                )
+                if run is not None:
+                    runs.append(run)
         return runs
+
+    def on_transition(
+        self,
+        path: Path,
+        file: TaggedFile,
+        previous: TaggedFile | None,
+        *,
+        content_changed: bool,
+        source: RunSource = RunSource.WATCH,
+        parent: RunHandle | None = None,
+        rescope: bool = False,
+    ) -> list[RunRecord]:
+        """The one entry point for a live file (DESIGN/v0-4-0.md §6): compare
+        what applied to ``previous`` (the row as it was — old key, old tags)
+        with what applies to ``file`` now, and fire what changed.
+
+        - entries the file left (moved, untagged, newly excluded) → ``removed``
+          as a move; - tags it gained → ``on_tag``; - entries it entered →
+          ``added``; - a content change under entries it kept → ``modified``.
+
+        ``rescope`` (start and reload) offers every entry in scope as
+        ``added`` again — the run key makes finished work a no-op — so a new
+        entry reaches the files it covers, and a changed file still gets
+        ``modified`` rather than a second ``added``.
+        """
+        before = self.scope(previous).applied if previous is not None else []
+        after = self.scope(file).applied
+        before_ids = {a.entry.identity for a in before}
+        after_ids = {a.entry.identity for a in after}
+        left = [a for a in before if a.entry.identity not in after_ids]
+        stayed = [a for a in after if a.entry.identity in before_ids]
+        if rescope and not content_changed:
+            entered = list(after)
+        else:
+            entered = [a for a in after if a.entry.identity not in before_ids]
+
+        runs: list[RunRecord] = []
+        if left and previous is not None:
+            runs.extend(
+                self.on_file(
+                    Hook.REMOVED,
+                    previous.original_path,
+                    previous,
+                    entries=left,
+                    source=source,
+                    parent=parent,
+                    moved=True,
+                )
+            )
+        old_tags = {t.name for t in previous.tags} if previous is not None else set()
+        for tag in [t.name for t in file.tags if t.name not in old_tags]:
+            runs.extend(self.on_tag(path, file, tag, source=source, parent=parent))
+        if entered:
+            runs.extend(
+                self.on_file(
+                    Hook.ADDED,
+                    path,
+                    file,
+                    entries=entered,
+                    source=source,
+                    parent=parent,
+                )
+            )
+        if content_changed and previous is not None and stayed:
+            runs.extend(
+                self.on_file(
+                    Hook.MODIFIED,
+                    path,
+                    file,
+                    entries=stayed,
+                    source=source,
+                    parent=parent,
+                )
+            )
+        return runs
+
+    def on_removed(
+        self, row: TaggedFile, *, moved: bool, source: RunSource = RunSource.WATCH
+    ) -> list[RunRecord]:
+        """The file is gone (or, ``moved``, its content lives on elsewhere):
+        ``removed`` for everything that applied to it."""
+        return self.on_file(
+            Hook.REMOVED,
+            row.original_path,
+            row,
+            entries=self.scope(row).applied,
+            source=source,
+            moved=moved,
+        )
 
     def on_lifecycle(self, hook: Hook) -> list[RunRecord]:
         """Run every loaded add-on's ``on_start`` / ``on_stop`` handler for
@@ -285,6 +423,7 @@ class ActionRunner:
             key = RunKey(
                 file_hash="",  # no file: the session is what makes it unique
                 action_name=addon.name,
+                handler=handler.name,
                 hook=hook,
                 args={"session": self.session},
             )
@@ -366,22 +505,34 @@ class ActionRunner:
             )
             return None
         path = file.original_path
-        if previous.hook is Hook.TAGGED:
-            tag = str(previous.args.get("tag", ""))
-            handlers = [h for h in addon.handlers(Hook.TAGGED) if h.spec.tag == tag]
-            raw_args: tuple[str, ...] = ()
-            key_args: dict[str, Any] | None = {"tag": tag}
-        else:
-            handlers = addon.handlers(previous.hook)
-            raw_args = ActionCall.from_marker(previous.slug).args
-            key_args = None
+        # The run's own arguments are the key (DESIGN/v0-4-0.md §7): a handler
+        # whose parameters no longer fit them cannot be retried under it.
+        handlers = [h for h in addon.named(previous.handler) if h.hook is previous.hook]
+        params = {k: v for k, v in previous.args.items() if k != "tag"}
+        unfit = [
+            m for h in handlers[:1] for m in check(h.func, params)
+        ]  # the marks share one function
+        if not handlers or unfit:
+            self.problem(
+                Severity.ERR,
+                "retry.key_changed",
+                f"cannot retry {run_id}: {previous.action_name}."
+                f"{previous.handler or '?'} "
+                + (
+                    f"no longer handles {previous.hook.value}"
+                    if not handlers
+                    else "no longer takes its arguments (" + "; ".join(unfit) + ")"
+                ),
+                action_name=previous.action_name,
+                run_id=run_id,
+            )
+            return None
         for handler in handlers:
             try:
                 run = self._execute(
                     handler,
                     previous.hook,
-                    raw_args=raw_args,
-                    key_args=key_args,
+                    args=dict(previous.args),
                     slug=previous.slug,
                     path=path,
                     file=file,
@@ -473,8 +624,7 @@ class ActionRunner:
         handler: FileHandler,
         hook: Hook,
         *,
-        raw_args: tuple[str, ...],
-        key_args: dict[str, Any] | None,
+        args: dict[str, Any],
         slug: str,
         path: Path,
         file: TaggedFile,
@@ -482,25 +632,21 @@ class ActionRunner:
         parent: RunHandle | None,
         retry_of: str | None = None,
     ) -> RunRecord | None:
+        """One handler, one file, one hook: key it, skip it if the key has a
+        run, bind ``args`` (the entry's own values, plus ``tag`` for a tagged
+        hook) and invoke."""
         addon = handler.addon
         record = self._action_record(addon)
         abs_path = self._abs(path)
 
         # The key first: it needs no resolver, and most events find their
         # run already there (DESIGN §6.1).
-        try:
-            args = (
-                key_args
-                if key_args is not None
-                else raw_by_name(handler.func, raw_args)
-            )
-        except SignatureError as e:
-            args = {"_args": list(raw_args)}
-            binding_failure: BindingError | None = BindingError(str(e))
-        else:
-            binding_failure = None
         key = RunKey(
-            file_hash=file.file_hash, action_name=addon.name, hook=hook, args=args
+            file_hash=file.file_hash,
+            action_name=addon.name,
+            handler=handler.name,
+            hook=hook,
+            args=args,
         )
         if retry_of is None:
             if self.store.find_run(key) is not None:
@@ -510,12 +656,12 @@ class ActionRunner:
             ):
                 return None  # a generated file never re-triggers its producer
 
-        if binding_failure is None:
-            try:
-                bound = bind(handler.func, raw_args, self.resolve)
-            except BindingError as e:
-                binding_failure = e
-        if binding_failure is not None:
+        params = {
+            k: v for k, v in args.items() if not (hook is Hook.TAGGED and k == "tag")
+        }
+        try:
+            bound = bind(handler.func, params, self.resolve)
+        except BindingError as binding_failure:
             try:
                 run = self.store.start_run(
                     record,
@@ -534,7 +680,7 @@ class ActionRunner:
             self.problem(
                 Severity.ERR,
                 "action.binding",
-                f"@@{slug} on {self._key_text(path)}: {binding_failure}",
+                f"{slug} on {self._key_text(path)}: {binding_failure}",
                 action_name=addon.name,
                 file_path=path,
                 run_id=run.id,
@@ -793,7 +939,9 @@ class ActionRunner:
 
     def emit(self, handle: RunHandle, path: Path) -> None:
         """Index an output file, record it as produced by this run, and give
-        its own name (tags and ``@@`` functions) its turn — as a chain."""
+        its tags and the configuration of its folder their turn — as a chain.
+        A file that already had a row gets ``modified`` (its content is new),
+        not ``added``."""
         indexed = self._index(path)
         key = self._key_or_none(path)
         if indexed is None or key is None:
@@ -806,20 +954,14 @@ class ActionRunner:
             return
         self.store.add_provenance(key, handle.id, ProvenanceKind.EMITTED)
         self.trace(handle, TraceKind.EMIT, {"path": key})
-        abs_path = self._abs(path)
-        for tag in indexed.new_tags:
-            self.on_tag(
-                abs_path, indexed.file, tag, source=RunSource.CHAIN, parent=handle
-            )
-        if indexed.parsed.actions:
-            self.on_file(
-                Hook.ADDED,
-                abs_path,
-                indexed.file,
-                indexed.parsed,
-                source=RunSource.CHAIN,
-                parent=handle,
-            )
+        self.on_transition(
+            self._abs(path),
+            indexed.file,
+            indexed.previous,
+            content_changed=indexed.content_changed,
+            source=RunSource.CHAIN,
+            parent=handle,
+        )
 
     def moved(self, handle: RunHandle, src: Path, dst: Path) -> None:
         old_key, new_key = self._key_or_none(src), self._key_or_none(dst)
@@ -861,13 +1003,18 @@ class ActionRunner:
         self.trace(
             handle, TraceKind.RECORD, {"tags": wanted, "path": self._key_text(path)}
         )
-        if add:
-            fresh = self.backend.query_file(path)
-            for name in names:
-                if name not in current and fresh is not None:
-                    self.on_tag(
-                        path, fresh, name, source=RunSource.CHAIN, parent=handle
-                    )
+        fresh = self.backend.query_file(path)
+        if fresh is not None and wanted != current:
+            # A tag gained or lost can move the file in or out of an entry's
+            # scope (an exclusion), and a gained tag has its handlers.
+            self.on_transition(
+                self._abs(path),
+                fresh,
+                file,
+                content_changed=False,
+                source=RunSource.CHAIN,
+                parent=handle,
+            )
 
     def resolve(self, kind: str, raw: str) -> Path:
         if kind == "remote":
@@ -943,14 +1090,18 @@ class ActionRunner:
         return indexed.file if indexed is not None else None
 
     def _index(self, path: Path):
-        """Index a *data* file; ``.tfs/`` and ``script/`` are never data."""
+        """Index a *data* file; ``.tfs/``, ``script/`` and a folder's
+        ``.tfsfunctions.yaml`` are never data."""
         abs_path = self._abs(path)
         try:
             if self.root.zone(abs_path) is not Zone.DATA:
                 return None
         except OutsideRoot:
             return None
-        return self.indexer.index(abs_path)
+        indexed = self.indexer.index(abs_path)
+        if indexed is not None:
+            self.report_parse_problems(indexed.parsed, abs_path)
+        return indexed
 
     def _action_record(self, addon) -> ActionRecord:
         if addon.record is None:
@@ -959,7 +1110,7 @@ class ActionRunner:
                 script_path=addon.key,
                 script_hash=addon.script_hash,
                 signature=addon.signature,
-                hooks=addon.hooks,
+                hooks=addon.hooks_by_handler,
             )
         return addon.record
 
@@ -1011,7 +1162,9 @@ class ActionRunner:
                     found.append(Path(current) / name)
         return sorted(found)
 
-    def _report_parse_problems(self, parsed: ParsedPath, path: Path) -> None:
+    def report_parse_problems(self, parsed: ParsedPath, path: Path) -> None:
+        """A malformed marker in a name is a P2 ``name.parse``, once per
+        marker per path (a v1 ``@@`` function is the common case now)."""
         for problem in parsed.problems:
             marker = (parsed.path.as_posix(), problem.marker)
             if marker in self._reported_parse_problems:

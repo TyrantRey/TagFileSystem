@@ -8,9 +8,8 @@ from typing import Callable
 from pydantic import BaseModel, ValidationError
 
 from tag_file_system.core.interface.tag import (
-    ARG_SEPARATOR,
-    MARKER_PREFIXES,
-    ActionCall,
+    FUNCTION_PREFIX,
+    TAG_PREFIX,
     ParsedPath,
     ParseProblem,
     Tag,
@@ -18,12 +17,13 @@ from tag_file_system.core.interface.tag import (
     illegal_chars,
 )
 from tag_file_system.core.logger import logger
+from tag_file_system.root import FUNCTIONS_FILE
 
 MarkerFactory = Callable[[str], BaseModel]
 
 # Output fields a marker may be routed to, with the model each one holds.
 # ``problems`` is the parser's own.
-_TARGET_FIELDS: dict[str, type[BaseModel]] = {"tags": Tag, "actions": ActionCall}
+_TARGET_FIELDS: dict[str, type[BaseModel]] = {"tags": Tag}
 
 
 @dataclass(frozen=True)
@@ -33,25 +33,35 @@ class Marker:
     factory: MarkerFactory  # raw marker text -> model
 
 
+def _rejected_function_marker(value: str) -> BaseModel:
+    """``@@`` no longer builds anything (DESIGN/v0-4-0.md §2): the marker is
+    reported, with a pointer to where the function went."""
+    raise ValueError(
+        f"'@@' functions moved to {FUNCTIONS_FILE} (see `tfs migrate`); "
+        "the marker is ignored"
+    )
+
+
 def split_extension(filename: str) -> str:
     """The filename without its extension, for parsing.
 
     The extension is what follows the last ``.`` (``Path.suffix``), *unless*
-    that text contains marker syntax — then it is part of a marker, not an
-    extension (``@@make_copy__.jpg__photos`` keeps ``.jpg__photos``). A
-    marker value that itself ends in a dotted part (``@@resize__1.5``) is
-    still cut: markers in filenames should precede the extension.
+    that text contains a tag marker — then it is part of a marker, not an
+    extension (``v1.2--beta`` keeps ``.2--beta``). A marker value that itself
+    ends in a dotted part is still cut: markers in filenames should precede
+    the extension.
     """
     suffix = PurePath(filename).suffix
     if not suffix:
         return filename
-    if any(token in suffix for token in (*MARKER_PREFIXES, ARG_SEPARATOR)):
+    if TAG_PREFIX in suffix:
         return filename
     return filename[: -len(suffix)]
 
 
 class TaggingParser:
-    """Parse the name grammar of DESIGN/v0-1-0.md §3.
+    """Parse the name grammar of DESIGN/v0-1-0.md §3 as narrowed by
+    DESIGN/v0-4-0.md §2: names carry tags only.
 
     ``parse`` handles one segment (a directory name or a filename stem);
     ``parse_path`` walks every segment of a root-relative path and merges the
@@ -59,12 +69,13 @@ class TaggingParser:
 
     Markers are registered, not hard-coded: ``register(prefix, field)`` maps a
     prefix to the ``TagParserOutput`` field its results land in and to a
-    factory that turns the raw text into a model. ``--`` (tags) and ``@@``
-    (actions) are registered by default; re-registering a prefix replaces its
-    factory. A marker whose text contains an illegal character, or whose
-    factory rejects it (``ValidationError``/``ValueError``) or returns the
-    wrong model, is recorded as a ``ParseProblem`` and skipped; the rest of
-    the segment still parses. Duplicate values within a segment are dropped.
+    factory that turns the raw text into a model. ``--`` (tags) is registered
+    by default, and so is ``@@`` — with a factory that always refuses, so a
+    v1 function marker becomes a problem instead of label text. A marker
+    whose text contains an illegal character, or whose factory rejects it
+    (``ValidationError``/``ValueError``) or returns the wrong model, is
+    recorded as a ``ParseProblem`` and skipped; the rest of the segment still
+    parses. Duplicate values within a segment are dropped.
     """
 
     def __init__(self) -> None:
@@ -72,8 +83,8 @@ class TaggingParser:
         self._markers: dict[str, Marker] = {}
         self._pattern: re.Pattern[str] | None = None
 
-        self.register("--", "tags")(lambda value: Tag(name=value))
-        self.register("@@", "actions")(ActionCall.from_marker)
+        self.register(TAG_PREFIX, "tags")(lambda value: Tag(name=value))
+        self.register(FUNCTION_PREFIX, "tags")(_rejected_function_marker)
 
     def register(
         self, prefix: str, field: str
@@ -184,14 +195,11 @@ class TaggingParser:
         segments = parts[:-1] + [last]
 
         tags: dict[str, Tag] = {}
-        actions: dict[ActionCall, None] = {}
         problems: list[ParseProblem] = []
         for index, segment in enumerate(segments):
             parsed = self.parse(segment)
             for tag in parsed.tags:
                 tags.setdefault(tag.name, tag)
-            for call in parsed.actions:
-                actions.setdefault(call)
             if stripped and index == len(segments) - 1 and parsed.problems:
                 # A marker cut by the extension rule looks like a user typo;
                 # say what actually happened.
@@ -202,9 +210,4 @@ class TaggingParser:
                 ]
             problems.extend(parsed.problems)
 
-        return ParsedPath(
-            path=posix,
-            tags=list(tags.values()),
-            actions=list(actions),
-            problems=problems,
-        )
+        return ParsedPath(path=posix, tags=list(tags.values()), problems=problems)

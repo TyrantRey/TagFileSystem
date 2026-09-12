@@ -170,6 +170,11 @@ class ActionContext:
         return self._handle.run.action_name
 
     @property
+    def handler_name(self) -> str:
+        """The function this run is calling, as ``.tfsfunctions.yaml`` names it."""
+        return self._handle.run.handler
+
+    @property
     def run(self) -> RunRecord:
         return self._handle.run
 

@@ -144,18 +144,25 @@ class ActionStore:
         script_path: PurePath | str,
         script_hash: str,
         signature: dict[str, Any],
-        hooks: list[Hook],
+        hooks: dict[str, list[Hook]],
     ) -> ActionRecord:
         """Upsert the add-on version ``(name, script_hash)``; refreshes
         ``loaded_at`` (sub-second) on every load so the newest load is the
-        live one even when versions flip within a second."""
+        live one even when versions flip within a second. ``signature`` and
+        ``hooks`` are keyed by handler name."""
         cursor = self.connection.cursor()
         row = cursor.execute(
             "SELECT id FROM actions WHERE name = ? AND script_hash = ?",
             (name, script_hash),
         ).fetchone()
         script_text = posix_key(script_path)
-        hooks_json = json.dumps([Hook(h).value for h in hooks])
+        hooks_json = json.dumps(
+            {
+                handler: [Hook(h).value for h in marks]
+                for handler, marks in hooks.items()
+            },
+            sort_keys=True,
+        )
         signature_json = canonical_json(signature)
         # Strictly later than every earlier load of this name: the wall clock
         # alone has ~15 ms granularity on Windows and would tie.
@@ -224,13 +231,20 @@ class ActionStore:
     def _row_to_action(row: sqlite3.Row) -> ActionRecord:
         loaded = _to_datetime(row["loaded_at"])
         assert loaded is not None
+        hooks = _loads(row["hooks_json"]) or {}
+        if isinstance(hooks, list):
+            # A row written before schema 3 listed the script's hooks as a
+            # whole; there was no handler dimension to key them by.
+            hooks = {"": hooks}
         return ActionRecord(
             id=row["id"],
             name=row["name"],
             script_path=PurePosixPath(row["script_path"]),
             script_hash=row["script_hash"],
             signature=_loads(row["signature_json"]) or {},
-            hooks=[Hook(h) for h in _loads(row["hooks_json"]) or []],
+            hooks={
+                handler: [Hook(h) for h in marks] for handler, marks in hooks.items()
+            },
             loaded_at=loaded,
         )
 
@@ -242,10 +256,17 @@ class ActionStore:
         row = self.connection.execute(
             """
             SELECT * FROM action_runs
-            WHERE file_hash = ? AND action_name = ? AND hook = ? AND args_json = ?
+            WHERE file_hash = ? AND action_name = ? AND handler = ?
+              AND hook = ? AND args_json = ?
             ORDER BY started_at DESC, rowid DESC LIMIT 1
             """,
-            (key.file_hash, key.action_name, key.hook.value, key.args_json),
+            (
+                key.file_hash,
+                key.action_name,
+                key.handler,
+                key.hook.value,
+                key.args_json,
+            ),
         ).fetchone()
         return self._row_to_run(row) if row is not None else None
 
@@ -287,14 +308,16 @@ class ActionStore:
         cursor.execute(
             """
             INSERT INTO action_runs
-                (id, action_id, action_name, hook, file_id, file_hash, slug, args_json,
-                 status, source, parent_run_id, retry_of, code_version, code_hash)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, action_id, action_name, handler, hook, file_id, file_hash, slug,
+                 args_json, status, source, parent_run_id, retry_of,
+                 code_version, code_hash)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
                 action.id,
                 key.action_name,
+                key.handler,
                 key.hook.value,
                 self._file_id(cursor, file_path),
                 key.file_hash,
@@ -361,6 +384,7 @@ class ActionStore:
         file_path: PathLike | None = None,
         file_hash: str | None = None,
         action_name: str | None = None,
+        handler: str | None = None,
         status: RunStatus | list[RunStatus] | None = None,
         since: datetime | None = None,
         path_prefix: str | None = None,
@@ -370,7 +394,7 @@ class ActionStore:
 
         ``file_path`` also matches runs started before the file row existed
         (``file_id`` NULL, same hash). ``path_prefix`` is a root-relative
-        key prefix such as ``"@@make_copy/"``.
+        key prefix such as ``"2024--trip/"``.
         """
         clauses: list[str] = []
         params: list[Any] = []
@@ -387,6 +411,9 @@ class ActionStore:
         if action_name is not None:
             clauses.append("r.action_name = ?")
             params.append(action_name)
+        if handler is not None:
+            clauses.append("r.handler = ?")
+            params.append(handler)
         if status is not None:
             statuses = (
                 [status] if isinstance(status, (RunStatus, str)) else list(status)
@@ -471,6 +498,7 @@ class ActionStore:
             id=row["id"],
             action_id=row["action_id"],
             action_name=row["action_name"],
+            handler=row["handler"],
             hook=Hook(row["hook"]),
             file_id=row["file_id"],
             file_hash=row["file_hash"],
