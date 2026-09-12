@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SCHEMA_FILE = "src/tag_file_system/database/migrations.py"
-RELEASES = (("0.9.0", 1, "old"), ("1.0.0", 2, "new"))
+RELEASES = (("0.9.0", 2, "old"), ("1.0.0", 3, "new"))
 
 
 def git(repo: Path, *args: str) -> str:

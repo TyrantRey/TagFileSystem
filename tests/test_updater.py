@@ -405,10 +405,10 @@ def test_head_state_prefers_a_release_tag(repo: FakeRepo):
 def test_check_reports_the_checkout_and_origin(root: Root, repo: FakeRepo):
     report = updater.check(root.path, repo=repo.path)
     assert report.head.tag == "v0.9.0" and report.head.branch is None
-    assert (report.current_version, report.current_schema) == ("0.9.0", 1)
+    assert (report.current_version, report.current_schema) == ("0.9.0", 2)
     assert report.tags == ["v1.0.0", "v0.9.0"]  # `latest`, `docs-1`: not releases
     assert (report.target, report.to_hash) == ("v1.0.0", repo.tags["v1.0.0"])
-    assert (report.to_version, report.to_schema) == ("1.0.0", 2)
+    assert (report.to_version, report.to_schema) == ("1.0.0", 3)
     assert report.available is True
     assert [r.path for r in report.roots] == [str(root.path)]  # registered by the check
 
@@ -475,9 +475,9 @@ def test_preflight_builds_the_plan(root: Root, repo: FakeRepo, tmp_path: Path):
     assert (plan.from_tag, plan.from_ref) == ("v0.9.0", "refs/tags/v0.9.0")
     assert plan.from_hash == repo.tags["v0.9.0"]
     assert (plan.to_tag, plan.to_hash) == ("v1.0.0", repo.tags["v1.0.0"])
-    assert (plan.to_version, plan.to_schema) == ("1.0.0", 2)
+    assert (plan.to_version, plan.to_schema) == ("1.0.0", 3)
     assert plan.snapshot_label == "v0.9.0"
-    assert plan.schema_changes is False  # the root is at SCHEMA_VERSION == 2
+    assert plan.schema_changes is False  # the root is at SCHEMA_VERSION == 3
     assert [r.path for r in plan.affected] == [str(root.path)] and plan.running == []
     assert plan.command("tfs")[0] == sys.executable and "-P" in plan.command("tfs")
 
@@ -497,7 +497,7 @@ def test_preflight_nothing_to_do_at_the_latest(root: Root, repo: FakeRepo):
 
 def test_preflight_refuses_a_schema_downgrade(root: Root, repo: FakeRepo):
     repo.checkout("v1.0.0")
-    # The root's database is at SCHEMA_VERSION (2); v0.9.0 declares 1.
+    # The root's database is at SCHEMA_VERSION (3); v0.9.0 declares 2.
     with pytest.raises(updater.UpdateError, match="not downgrading"):
         updater.preflight(root.path, repo=repo.path, to="v0.9.0")
 
@@ -575,13 +575,13 @@ def test_main_needs_consent_for_a_schema_change(
     capsys: pytest.CaptureFixture,
 ):
     connection = sqlite3.connect(root.db_path)
-    connection.execute("PRAGMA user_version = 1")
+    connection.execute("PRAGMA user_version = 2")
     connection.commit()
     connection.close()
     monkeypatch.setattr(updater, "repo_dir", lambda: repo.path)
 
     assert updater.main(["--root", str(root.path)]) == 1  # stdin is not a tty
     captured = capsys.readouterr()
-    assert "schema 1 -> 2" in captured.out and "--yes" in captured.err
+    assert "schema 2 -> 3" in captured.out and "--yes" in captured.err
     assert repo.marker() == "old"
     assert Lock(root).holder() is None

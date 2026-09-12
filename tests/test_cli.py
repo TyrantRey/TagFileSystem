@@ -55,8 +55,11 @@ def root(tmp_path: Path) -> Root:
         root.config_path
     )
     (root.script_dir / "copy.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
-    (root.path / "@@copy" / "a--photo.txt").parent.mkdir()
-    (root.path / "@@copy" / "a--photo.txt").write_text("a")
+    (root.path / "copy" / "a--photo.txt").parent.mkdir()
+    (root.path / "copy" / "a--photo.txt").write_text("a")
+    (root.path / "copy" / ".tfsfunctions.yaml").write_text(
+        "version: 1\nfunctions:\n  copy:\n    run: {}\n", encoding="utf-8"
+    )
     return root
 
 
@@ -128,14 +131,14 @@ def test_list_and_query_through_the_daemon(root: Root, daemon: Daemon):
 
     found = tfs("query", "--root", str(root.path), "-t", "photo")
     assert found.exit_code == 0, found.output
-    assert "@@copy/a--photo.txt" in found.output and "tags: photo" in found.output
+    assert "copy/a--photo.txt" in found.output and "tags: photo" in found.output
 
     nothing = tfs("query", "--root", str(root.path), "-t", "nope")
     assert "(no files)" in nothing.output
 
     with_runs = json.loads(
         tfs(
-            "query", "--root", str(root.path), "--under", "@@copy", "--runs", "--json"
+            "query", "--root", str(root.path), "--under", "copy", "--runs", "--json"
         ).output
     )
     assert with_runs[0]["runs"][0]["action_name"] == "copy"
@@ -152,7 +155,7 @@ def test_query_falls_back_to_the_database(root: Root):
     result = tfs("query", "--root", str(root.path), "-t", "photo", "--runs")
 
     assert result.exit_code == 0, result.output
-    assert "@@copy/a--photo.txt" in result.output
+    assert "copy/a--photo.txt" in result.output
     assert "copy added ok" in result.output
 
 
@@ -343,7 +346,7 @@ def test_fallbacks_survive_a_broken_config_or_token(root: Root):
 
     assert tfs("list", "--root", str(root.path)).exit_code == 0
     assert (
-        "@@copy/a--photo.txt"
+        "copy/a--photo.txt"
         in tfs("query", "--root", str(root.path), "-t", "photo").output
     )
     stop = tfs("stop", "--root", str(root.path))

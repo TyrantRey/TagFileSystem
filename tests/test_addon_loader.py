@@ -92,8 +92,21 @@ def test_load_all_discovers_handlers(root: Root, loader: AddonLoader, problems):
     assert (
         loader.problem_handlers(Severity.WARN) == []
     )  # err handler does not cover warn
-    assert addon.signature["added"]["properties"]["dst"]["x-tfs-path"] == "remote"
-    assert addon.signature["added"]["properties"]["suffix"]["default"] == ".jpg"
+    assert addon.signature["run"]["properties"]["dst"]["x-tfs-path"] == "remote"
+    assert addon.signature["run"]["properties"]["suffix"]["default"] == ".jpg"
+    run = loader.handler_for("make_copy", "run")
+    assert run is not None and run.name == "run"
+    assert loader.handler_for("make_copy", "notify") is None  # not a file handler
+    assert loader.handler_for("nope", "run") is None
+    assert [
+        h.hook for h in loader.handler_marks("make_copy", "gone", Hook.REMOVED)
+    ] == [Hook.REMOVED]
+    assert loader.handler_marks("make_copy", "gone", Hook.ADDED) == []
+    assert addon.hooks_of("gone") == ["removed+move"]
+    described = addon.describe()
+    assert [h["name"] for h in described["handlers"]] == ["run", "gone", "on_photo"]
+    assert described["handlers"][2]["hooks"] == ["tagged:photos"]
+    assert described["problem_hooks"] == ["err"]
     assert problems == []
 
 
@@ -123,8 +136,11 @@ def test_lifecycle_handlers_are_collected_and_described(
     assert addon.hooks == [Hook.ON_START, Hook.ON_STOP]
     assert [h.name for h in loader.lifecycle_handlers(Hook.ON_START)] == ["up"]
     assert [h.name for h in loader.lifecycle_handlers(Hook.ON_STOP)] == ["down"]
-    assert addon.describe()["hooks"] == ["on_start", "on_stop"]
-    assert addon.signature["on_start"] == {
+    assert [(h["name"], h["hooks"]) for h in addon.describe()["handlers"]] == [
+        ("up", ["on_start"]),
+        ("down", ["on_stop"]),
+    ]
+    assert addon.signature["up"] == {
         "type": "object",
         "properties": {},
         "required": [],
@@ -205,7 +221,7 @@ def test_bad_handler_signatures_are_reported_and_skipped(
     assert [p[1] for p in problems] == ["addon.signature"] * 3
 
 
-def test_second_handler_for_the_same_hook_is_reported_and_skipped(
+def test_several_handlers_may_share_a_hook_but_not_a_name(
     root: Root, loader: AddonLoader, problems
 ):
     write(
@@ -234,6 +250,16 @@ def test_second_handler_for_the_same_hook_is_reported_and_skipped(
         @action.removed(on_move=True)
         def both(path, metadata, ctx):
             pass
+
+        alias = both  # the same function under another name: one handler
+
+        def _make():
+            @action.modified()
+            def first(path, metadata, ctx):
+                pass
+            return first
+
+        first_again = _make()  # a second function called `first`: unaddressable
         """,
     )
 
@@ -242,12 +268,46 @@ def test_second_handler_for_the_same_hook_is_reported_and_skipped(
     assert addon is not None
     assert [(h.name, h.spec.describe()) for h in addon.file_handlers] == [
         ("first", "added"),  # source order
+        ("second", "added"),  # DESIGN/v0-4-0.md §5: handlers are addressed by name
         ("tag_a", "tagged:a"),
         ("tag_b", "tagged:b"),
-        ("both", "removed"),  # marks are top-down: the first removed() wins
+        ("both", "removed"),  # marks are top-down
+        ("both", "removed+move"),
     ]
-    assert [p[1] for p in problems] == ["addon.duplicate_handler"] * 2
+    assert addon.named("both") == addon.file_handlers[4:]
+    assert addon.hooks_of("both") == ["removed", "removed+move"]
+    assert [p[1] for p in problems] == ["addon.signature"]
     assert all(p[0] is Severity.ERR for p in problems)
+
+
+def test_reserved_parameter_names_are_signature_errors(
+    root: Root, loader: AddonLoader, problems
+):
+    write(
+        root,
+        "reserved.py",
+        """
+        from tag_file_system import action
+
+        @action.tagged("x")
+        def on_x(path, metadata, ctx, tag: str = ""):
+            pass
+
+        @action.added()
+        def run(path, metadata, ctx, exclude: list[str] = []):
+            pass
+
+        @action.added()
+        def fine(path, metadata, ctx, tag: str = ""):
+            pass
+        """,
+    )
+
+    addon = loader.load(root.script_dir / "reserved.py")
+
+    assert addon is not None
+    assert [h.name for h in addon.file_handlers] == ["fine"]  # `tag` is fine off tagged
+    assert [p[1] for p in problems] == ["addon.signature"] * 2
 
 
 def test_reload_replaces_handlers_and_keeps_old_on_failure(
@@ -744,8 +804,12 @@ def test_loader_registers_actions_in_the_store(root: Root, tmp_path: Path):
     assert record.id == addon.record.id
     assert record.script_path.as_posix() == "script/make_copy.py"
     assert record.script_hash == addon.script_hash
-    assert set(record.hooks) == {Hook.ADDED, Hook.REMOVED, Hook.TAGGED}
-    assert record.signature["added"].get("required", []) == []
+    assert record.hooks == {
+        "run": [Hook.ADDED],
+        "gone": [Hook.REMOVED],
+        "on_photo": [Hook.TAGGED],
+    }
+    assert record.signature["run"].get("required", []) == []
 
     write(
         root, "make_copy.py", MAKE_COPY.replace('return "v1"', 'return "v1"  # changed')

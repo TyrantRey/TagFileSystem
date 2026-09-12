@@ -4,8 +4,8 @@ from pathlib import PurePath, PurePosixPath, PureWindowsPath
 
 import pytest
 
-from tag_file_system.core.interface.tag import ActionCall, Tag
-from tag_file_system.services.tagging import TaggingParser
+from tag_file_system.core.interface.tag import ParseProblem, Tag
+from tag_file_system.services.tagging import TaggingParser, split_extension
 
 
 @pytest.fixture
@@ -16,10 +16,9 @@ def parser() -> TaggingParser:
 # ------------------------------------------------------------------ segments
 
 
-def test_segment_yields_tags_and_action_with_args(parser: TaggingParser):
-    out = parser.parse("@@make_copy__.jpg__photos--archive--Q3")
+def test_segment_yields_tags(parser: TaggingParser):
+    out = parser.parse("report--archive--Q3")
 
-    assert out.actions == [ActionCall(name="make_copy", args=(".jpg", "photos"))]
     assert [t.name for t in out.tags] == ["archive", "q3"]
     assert out.problems == []
 
@@ -33,37 +32,30 @@ def test_label_is_ignored_and_optional(parser: TaggingParser):
     assert parser.parse("plain-name").tags == []
 
 
-def test_function_slug_is_lowercased_but_args_keep_case(parser: TaggingParser):
-    out = parser.parse("@@Make_Copy__.JPG__Photos")
+def test_function_markers_are_rejected_with_a_pointer(parser: TaggingParser):
+    # DESIGN/v0-4-0.md §2: `@@` builds nothing; the marker is reported and the
+    # rest of the name still parses.
+    out = parser.parse("@@make_copy__.jpg__photos--archive--Q3")
 
-    assert out.actions == [ActionCall(name="make_copy", args=(".JPG", "Photos"))]
+    assert [t.name for t in out.tags] == ["archive", "q3"]
+    assert [p.marker for p in out.problems] == ["@@make_copy__.jpg__photos"]
+    assert ".tfsfunctions.yaml" in out.problems[0].message
+    assert "tfs migrate" in out.problems[0].message
 
-
-def test_action_without_args(parser: TaggingParser):
-    out = parser.parse("@@backup")
-
-    assert out.actions == [ActionCall(name="backup", args=())]
-    assert out.actions[0].slug == "backup"
-    assert str(out.actions[0]) == "@@backup"
-
-
-def test_args_cannot_contain_other_markers(parser: TaggingParser):
-    # "--" and "@@" always start a new marker, so args never contain them
-    out = parser.parse("@@resize__800--photo@@rotate__90")
-
-    assert out.actions == [
-        ActionCall(name="resize", args=("800",)),
-        ActionCall(name="rotate", args=("90",)),
+    path = parser.parse_path(PurePosixPath("@@resize__800/x--t/@@rotate/a.txt"))
+    assert path.tag_names == ["t"]
+    assert [(p.segment, p.marker) for p in path.problems] == [
+        ("@@resize__800", "@@resize__800"),
+        ("@@rotate", "@@rotate"),
     ]
-    assert [t.name for t in out.tags] == ["photo"]
 
 
 @pytest.mark.parametrize(
     "segment",
     [
         "a--x:y",  # colon
-        "a@@f__a/b",  # slash
-        "a@@f__a\\b",  # backslash
+        "a--x/y",  # slash
+        "a--x\\y",  # backslash
         "a--x<y",
         "a--x>y",
         "a--x|y",
@@ -78,7 +70,6 @@ def test_illegal_characters_make_the_marker_a_problem(
     out = parser.parse(segment + "--ok")
 
     assert [t.name for t in out.tags] == ["ok"]
-    assert out.actions == []
     assert len(out.problems) == 1
     assert "illegal characters" in out.problems[0].message
     assert out.problems[0].segment == segment + "--ok"
@@ -88,14 +79,9 @@ def test_illegal_characters_make_the_marker_a_problem(
     "segment, marker",
     [
         ("notes--valid--", "--"),  # trailing tag marker
-        ("x@@make_copy__", "@@make_copy__"),  # trailing arg separator
-        ("x@@_private", "@@_private"),  # name may not start with _
-        ("x@@trailing_", "@@trailing_"),  # name may not end with _
-        ("x@@1st", "@@1st"),  # name must start with a letter
-        ("x@@f___a", "@@f___a"),  # arg may not start with _
-        ("x@@f__a_", "@@f__a_"),  # arg may not end with _
-        ("x@@", "@@"),  # empty function
         ("x--!!!", "--!!!"),  # tag empty after normalization
+        ("x@@", "@@"),  # a function marker, empty or not: gone
+        ("x@@make_copy__.jpg", "@@make_copy__.jpg"),
     ],
 )
 def test_invalid_markers_are_skipped_not_fatal(
@@ -116,48 +102,15 @@ def test_tag_normalization(parser: TaggingParser):
     assert [t.name for t in out.tags] == ["helloworld", "a-b", "é"]
 
 
-def test_action_call_is_hashable_and_dedupes_by_value():
-    a = ActionCall(name="f", args=("1",))
-    b = ActionCall.from_marker("f__1")
-
-    assert a == b
-    assert len({a, b}) == 1
-    assert repr(a) == "ActionCall('f', ['1'])"
-
-
 # -------------------------------------------------------------------- paths
 
 
 def test_parse_path_merges_parent_first(parser: TaggingParser):
-    out = parser.parse_path(
-        PurePosixPath("@@make_copy__.jpg__photos--archive/2024--trip/img--raw.jpg")
-    )
+    out = parser.parse_path(PurePosixPath("2024--archive/2024--trip/img--raw.jpg"))
 
-    assert out.path == PurePosixPath(
-        "@@make_copy__.jpg__photos--archive/2024--trip/img--raw.jpg"
-    )
+    assert out.path == PurePosixPath("2024--archive/2024--trip/img--raw.jpg")
     assert out.tag_names == ["archive", "trip", "raw"]
-    assert out.actions == [ActionCall(name="make_copy", args=(".jpg", "photos"))]
     assert out.problems == []
-
-
-def test_parse_path_orders_actions_parent_first_filename_last(
-    parser: TaggingParser,
-):
-    out = parser.parse_path(PurePosixPath("@@a/@@b__1/x@@c.txt"))
-
-    assert [c.slug for c in out.actions] == ["a", "b__1", "c"]
-
-
-def test_parse_path_dedupes_identical_calls_but_keeps_different_args(
-    parser: TaggingParser,
-):
-    out = parser.parse_path(
-        PurePosixPath("@@resize__800/x/@@resize__400/@@resize__800/f--t--t.png")
-    )
-
-    assert [c.slug for c in out.actions] == ["resize__800", "resize__400"]
-    assert out.tag_names == ["t"]
 
 
 def test_parse_path_uses_stem_for_files_and_full_name_for_directories(
@@ -173,22 +126,20 @@ def test_parse_path_uses_stem_for_files_and_full_name_for_directories(
 
 
 def test_parse_path_collects_problems_with_their_segment(parser: TaggingParser):
-    out = parser.parse_path(PurePosixPath("@@bad_/ok--fine/x--.txt"))
+    out = parser.parse_path(PurePosixPath("x--/ok--fine/y--.txt"))
 
     assert out.tag_names == ["fine"]
-    assert out.actions == []
     assert [(p.segment, p.marker) for p in out.problems] == [
-        ("@@bad_", "@@bad_"),
         ("x--", "--"),
+        ("y--", "--"),
     ]
 
 
 def test_parse_path_accepts_windows_paths_and_reports_posix(parser: TaggingParser):
-    out = parser.parse_path(PureWindowsPath("@@f__1\\sub--t\\file.txt"))
+    out = parser.parse_path(PureWindowsPath("2024--f\\sub--t\\file.txt"))
 
-    assert out.path == PurePosixPath("@@f__1/sub--t/file.txt")
-    assert out.tag_names == ["t"]
-    assert [c.slug for c in out.actions] == ["f__1"]
+    assert out.path == PurePosixPath("2024--f/sub--t/file.txt")
+    assert out.tag_names == ["f", "t"]
 
 
 @pytest.mark.parametrize(
@@ -217,54 +168,51 @@ def test_parse_path_rejects_parent_components(parser: TaggingParser):
 
 
 @pytest.mark.parametrize(
-    "filename, tags, slugs",
+    "filename, tags",
     [
-        ("img--raw.jpg", ["raw"], []),
-        ("archive.tar.gz", [], []),
-        ("v1.2--beta", ["beta"], []),  # suffix ".2--beta" holds a marker
-        ("photo.2024--trip", ["trip"], []),
-        ("@@make_copy__.jpg__photos", [], ["make_copy__.jpg__photos"]),
-        ("x@@f__1.tar.gz", [], ["f__1.tar"]),  # last dotted part is the extension
-        ("notes--v1.0.txt", ["v10"], []),  # ".txt" cut, "." then normalized away
+        ("img--raw.jpg", ["raw"]),
+        ("archive.tar.gz", []),
+        ("v1.2--beta", ["beta"]),  # suffix ".2--beta" holds a marker
+        ("photo.2024--trip", ["trip"]),
+        ("notes--v1.0.txt", ["v10"]),  # ".txt" cut, "." then normalized away
+        ("report__final.jpg", []),  # "__" is plain text now
+        ("a__b--x.tar.gz", ["xtar"]),  # only the last dotted part is cut
     ],
 )
-def test_filename_extension_rule(parser: TaggingParser, filename, tags, slugs):
+def test_filename_extension_rule(parser: TaggingParser, filename, tags):
     out = parser.parse_path(PurePosixPath(filename))
 
     assert out.tag_names == tags
-    assert [c.slug for c in out.actions] == slugs
+
+
+def test_split_extension_keeps_only_a_tag_marker(parser: TaggingParser):
+    assert split_extension("img--raw.jpg") == "img--raw"
+    assert split_extension("v1.2--beta") == "v1.2--beta"
+    assert split_extension("README") == "README"
+    # a `@@` in the suffix no longer holds anything worth keeping
+    assert split_extension("photo.jpg@@x") == "photo"
+    assert split_extension("a__b.txt") == "a__b"
 
 
 def test_line_breaks_inside_a_marker_are_a_problem(parser: TaggingParser):
-    for segment in ("--a\nb--c", "@@f__a\nb", "--a\n", "--a\r\nb"):
+    for segment in ("--a\nb--c", "--a\n", "--a\r\nb"):
         out = parser.parse(segment)
         assert [p.marker for p in out.problems][0].startswith(segment[:3])
         assert "illegal characters" in out.problems[0].message
     assert [t.name for t in parser.parse("--a\nb--c").tags] == ["c"]
 
 
-@pytest.mark.parametrize("segment", ["@@ f__a", "@@f __a", "@@f\t__a"])
-def test_whitespace_in_function_name_is_a_problem(parser: TaggingParser, segment):
-    out = parser.parse(segment)
-
-    assert out.actions == []
-    assert len(out.problems) == 1
-
-
 def test_unicode_is_nfc_normalized(parser: TaggingParser):
-    nfc = parser.parse("--café@@f__café")
-    nfd = parser.parse("--cafe\u0301@@f__cafe\u0301")
+    nfc = parser.parse("--café")
+    nfd = parser.parse("--cafe\u0301")
 
     assert nfc.tags == nfd.tags == [Tag(name="café")]
-    assert nfc.actions == nfd.actions
-    assert nfc.actions[0].args == ("café",)
 
 
 def test_parse_dedupes_within_a_segment(parser: TaggingParser):
-    out = parser.parse("--a--a--A@@f@@F@@f__1")
+    out = parser.parse("--a--a--A--b")
 
-    assert [t.name for t in out.tags] == ["a"]
-    assert [c.slug for c in out.actions] == ["f", "f__1"]
+    assert [t.name for t in out.tags] == ["a", "b"]
 
 
 def test_factory_errors_and_wrong_models_become_problems(parser: TaggingParser):
@@ -274,32 +222,17 @@ def test_factory_errors_and_wrong_models_become_problems(parser: TaggingParser):
         return Tag(name=value)
 
     parser.register("--", "tags")(picky)
-    parser.register("%%", "actions")(lambda value: Tag(name=value))  # wrong model
+    parser.register("%%", "tags")(
+        lambda value: ParseProblem(segment="", marker="", message=value)  # wrong model
+    )
 
     out = parser.parse("x--ok--boom%%y")
 
     assert [t.name for t in out.tags] == ["ok"]
-    assert out.actions == []
     assert [(p.marker, p.message) for p in out.problems] == [
         ("--boom", "no boom allowed"),
-        ("%%y", "factory for '%%' returned Tag, expected ActionCall"),
+        ("%%y", "factory for '%%' returned ParseProblem, expected Tag"),
     ]
-
-
-@pytest.mark.parametrize(
-    "kwargs",
-    [
-        {"name": "f", "args": ("a--b",)},
-        {"name": "f", "args": ("a__b",)},
-        {"name": "f", "args": ("a@@b",)},
-        {"name": "f", "args": ("a:b",)},
-        {"name": "f--g"},
-        {"name": " f"},
-    ],
-)
-def test_action_call_built_directly_still_obeys_the_grammar(parser, kwargs):
-    with pytest.raises(ValueError):
-        ActionCall(**kwargs)
 
 
 def test_tag_rejects_illegal_characters_directly():
@@ -307,32 +240,36 @@ def test_tag_rejects_illegal_characters_directly():
         Tag(name="a:b")
     with pytest.raises(ValueError):
         Tag(name="a--b")
+    with pytest.raises(ValueError):
+        Tag(name="a@@b")  # still a marker boundary
     assert "category" not in Tag.model_fields
 
 
-def test_double_underscore_is_allowed_inside_a_tag(parser: TaggingParser):
-    # "__" only separates args of a @@ marker; a tag ends at -- or @@ only.
+def test_double_underscore_is_plain_text(parser: TaggingParser):
+    # "__" separated a function's arguments once; nothing gives it meaning now.
     out = parser.parse_path(PurePosixPath("docs--api__v2/readme--draft__1.md"))
 
     assert out.tag_names == ["api__v2", "draft__1"]
     assert out.problems == []
+    plain = parser.parse_path(PurePosixPath("reports/q3__final__v2.xlsx"))
+    assert plain.tags == [] and plain.problems == []
 
 
 def test_problem_caused_by_extension_stripping_says_so(parser: TaggingParser):
-    out = parser.parse_path(PurePosixPath("photo@@make_copy__.jpg"))
+    out = parser.parse_path(PurePosixPath("photo--.jpg"))
 
-    assert out.actions == []
+    assert out.tags == []
     assert len(out.problems) == 1
     assert "extension '.jpg' was stripped" in out.problems[0].message
     # directories are never stripped, so no hint there
-    as_dir = parser.parse_path(PurePosixPath("@@bad_"), is_file=False)
+    as_dir = parser.parse_path(PurePosixPath("photo--"), is_file=False)
     assert "stripped" not in as_dir.problems[0].message
 
 
 def test_parse_path_of_empty_path_is_empty(parser: TaggingParser):
     out = parser.parse_path(PurePath(""))
 
-    assert out.tags == [] and out.actions == [] and out.problems == []
+    assert out.tags == [] and out.problems == []
 
 
 # ----------------------------------------------------------------- registry
@@ -353,13 +290,12 @@ def test_registered_marker_overrides_default_factory(parser: TaggingParser):
     assert set(parser.markers) == {"--", "@@"}
 
 
-def test_new_prefix_routes_to_chosen_field(parser: TaggingParser):
-    parser.register("%%", "actions")(lambda value: ActionCall(name=f"by_{value}"))
+def test_new_prefix_routes_to_tags(parser: TaggingParser):
+    parser.register("%%", "tags")(lambda value: Tag(name=f"by-{value}"))
 
-    out = parser.parse("photo--trip%%alice@@resize__100")
+    out = parser.parse("photo--trip%%alice")
 
-    assert [t.name for t in out.tags] == ["trip"]
-    assert [a.slug for a in out.actions] == ["by_alice", "resize__100"]
+    assert [t.name for t in out.tags] == ["trip", "by-alice"]
     assert "%%" in parser.pattern
 
 
@@ -368,5 +304,7 @@ def test_register_validates_inputs(parser: TaggingParser):
         parser.register("", "tags")
     with pytest.raises(ValueError):
         parser.register("##", "nope")
+    with pytest.raises(ValueError):
+        parser.register("##", "actions")  # gone with the function markers
     with pytest.raises(ValueError):
         parser.register("##", "problems")  # reserved for the parser itself

@@ -52,8 +52,11 @@ def root(tmp_path: Path) -> Root:
         root.config_path
     )
     (root.script_dir / "copy.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
-    (root.path / "@@copy" / "a--photo.txt").parent.mkdir()
-    (root.path / "@@copy" / "a--photo.txt").write_text("a")
+    (root.path / "copy" / "a--photo.txt").parent.mkdir()
+    (root.path / "copy" / "a--photo.txt").write_text("a")
+    (root.path / "copy" / ".tfsfunctions.yaml").write_text(
+        "version: 1\nfunctions:\n  copy:\n    run: {}\n", encoding="utf-8"
+    )
     return root
 
 
@@ -83,18 +86,20 @@ def test_health_actions_and_files(root: Root, daemon: Daemon, client: ControlCli
 
     payload = client.actions()
     (action,) = payload["actions"]
-    assert action["name"] == "copy" and action["hooks"] == ["added"]
-    assert action["signature"]["added"]["properties"]["suffix"]["default"] == ".bak"
+    assert action["name"] == "copy" and action["script"] == "script/copy.py"
+    (handler,) = action["handlers"]
+    assert handler["name"] == "run" and handler["hooks"] == ["added"]
+    assert handler["signature"]["properties"]["suffix"]["default"] == ".bak"
     assert payload["problems"] == []
 
     files = client.files(tags=["photo"])
-    assert [f["path"] for f in files] == ["@@copy/a--photo.txt"]
+    assert [f["path"] for f in files] == ["copy/a--photo.txt"]
     assert files[0]["tags"] == ["photo"] and "runs" not in files[0]
-    with_runs = client.files(prefix="@@copy", runs=True)
+    with_runs = client.files(prefix="copy", runs=True)
     assert with_runs[0]["runs"][0]["status"] == "ok"
     assert client.files(tags=["nope"]) == []
-    assert client.files(name="A--", format=".txt")[0]["path"] == "@@copy/a--photo.txt"
-    assert client.files(mime="text/*")[0]["path"] == "@@copy/a--photo.txt"
+    assert client.files(name="A--", format=".txt")[0]["path"] == "copy/a--photo.txt"
+    assert client.files(mime="text/*")[0]["path"] == "copy/a--photo.txt"
     assert client.files(mime="image/*") == []
 
 
@@ -163,7 +168,8 @@ def test_reload_and_stop(root: Root, daemon: Daemon, client: ControlClient):
 
     result = client.reload()
 
-    assert result == {"config": "reloaded", "addons": ["copy", "extra"]}
+    assert result["config"] == "reloaded" and result["addons"] == ["copy", "extra"]
+    assert result["functions"] == {"files": 1, "problems": 0}
     assert daemon.config.remotes == {"x": "/x"}
 
     root.config_path.write_text("[daemon]\nport = 'oops'\n")

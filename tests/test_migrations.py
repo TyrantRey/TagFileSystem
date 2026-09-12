@@ -6,9 +6,14 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from tag_file_system.core.interface.action import Hook, RunKey
 from tag_file_system.core.paths import is_anchored, posix_key
+from tag_file_system.database.action_store import ActionStore
 from tag_file_system.database.migrations import (
+    LEGACY_SCHEMA,
     SCHEMA_VERSION,
+    V1_SCHEMA,
+    V2_SCHEMA,
     MigrationError,
     SchemaTooNew,
     apply_migrations,
@@ -95,7 +100,7 @@ def test_fresh_database_is_at_current_version(tmp_path: Path):
     backend = SQLiteBackend()
     backend.init_database(tmp_path / "fresh.db", root_dir=tmp_path)
 
-    assert user_version(backend.connection) == SCHEMA_VERSION == 2
+    assert user_version(backend.connection) == SCHEMA_VERSION == 3
     assert tables(backend.connection) == EXPECTED_TABLES
     assert "mtime_ns" in columns(backend.connection, "files")
     assert backend.migration_report is not None
@@ -128,6 +133,63 @@ def test_newer_database_is_refused(tmp_path: Path):
 
     with pytest.raises(SchemaTooNew):
         SQLiteBackend().init_database(db, root_dir=tmp_path)
+
+
+def test_migration_3_adds_handler_and_rebuilds_the_key_index(tmp_path: Path):
+    # A database exactly as 0.3.x left it: schema 2, one loaded add-on, one run.
+    db = tmp_path / "v2.db"
+    connection = sqlite3.connect(db)
+    for statement in (*LEGACY_SCHEMA, *V1_SCHEMA, *V2_SCHEMA):
+        connection.execute(statement)
+    connection.execute("ALTER TABLE files ADD COLUMN mtime_ns INTEGER")
+    connection.execute("ALTER TABLE action_runs ADD COLUMN code_version TEXT")
+    connection.execute("ALTER TABLE action_runs ADD COLUMN code_hash TEXT")
+    connection.execute(
+        "INSERT INTO actions (id, name, script_path, script_hash, signature_json, hooks_json)"
+        " VALUES ('a1', 'copy', 'script/copy.py', 'h', '{}', '[\"added\"]')"
+    )
+    connection.execute(
+        "INSERT INTO action_runs (id, action_id, action_name, hook, file_hash, slug,"
+        " args_json, status, source) VALUES ('r1', 'a1', 'copy', 'added', 'fh',"
+        " 'copy__x', '{\"suffix\":\"x\"}', 'ok', 'watch')"
+    )
+    connection.execute("PRAGMA user_version = 2")
+    connection.commit()
+    connection.close()
+
+    backend = SQLiteBackend()
+    backend.init_database(db, root_dir=tmp_path)
+
+    assert user_version(backend.connection) == SCHEMA_VERSION == 3
+    assert backend.migration_report is not None
+    assert backend.migration_report.from_version == 2
+    assert "handler" in columns(backend.connection, "action_runs")
+    index_columns = [
+        row[2]
+        for row in backend.connection.execute("PRAGMA index_info(idx_action_runs_key)")
+    ]
+    assert index_columns == ["file_hash", "action_name", "handler", "hook", "args_json"]
+
+    store = ActionStore(backend)
+    old_key = RunKey(
+        file_hash="fh", action_name="copy", hook=Hook.ADDED, args={"suffix": "x"}
+    )
+    found = store.find_run(old_key)
+    assert found is not None and found.id == "r1" and found.handler == ""
+    assert found.key == old_key
+    # The same work addressed to a named handler is a new key: no v1 row can
+    # ever answer for a 0.4.0 run.
+    new_key = RunKey(
+        file_hash="fh",
+        action_name="copy",
+        handler="run",
+        hook=Hook.ADDED,
+        args={"suffix": "x"},
+    )
+    assert store.find_run(new_key) is None
+    record = store.get_action("a1")
+    assert record is not None and record.hooks == {"": [Hook.ADDED]}
+    backend.close()
 
 
 # ------------------------------------------------------------------ legacy
