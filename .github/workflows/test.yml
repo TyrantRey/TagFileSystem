@@ -68,6 +68,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # `set -e` ends the script silently: say which command failed.
+          trap 'echo "smoke test failed at line $LINENO: $BASH_COMMAND (exit $?)" >&2' ERR
           # $PWD, not $RUNNER_TEMP: on Windows the latter is a backslash path
           root="$PWD/ci-smoke-root"
           uv run tfs --version
@@ -200,6 +202,8 @@ jobs:
           TFS_IMAGE_TAG: ci
         run: |
           set -euo pipefail
+          # `set -e` ends the script silently: say which command failed.
+          trap 'echo "smoke test failed at line $LINENO: $BASH_COMMAND (exit $?)" >&2' ERR
           root="$PWD/ci-docker-root"
           mkdir -p "$root"
           export TFS_ROOT="$root" PUID="$(id -u)" PGID="$(id -g)"
