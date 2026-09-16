@@ -65,6 +65,14 @@ def wait_for(condition, timeout: float = 5.0) -> bool:
     return condition()
 
 
+def settled(daemon: Daemon, condition, timeout: float = 5.0) -> bool:
+    """``condition`` holds *and* the daemon's queue is idle. A run's row is
+    final before its ``_invoke`` returns, and that return is what puts the
+    process streams back: a ``tfs()`` call started in between would have its
+    ``CliRunner`` buffer swapped out from under it by the watch thread."""
+    return wait_for(condition, timeout) and daemon.queue.drain(timeout)
+
+
 @pytest.fixture
 def root(tmp_path: Path) -> Root:
     result = tfs("init", str(tmp_path / "vault"))
@@ -235,13 +243,17 @@ def test_pause_resume_retry_cancel_and_rerun(root: Root, daemon: Daemon):
     assert daemon.store.count_runs(file_path="copy/bad--photo.txt") == 0  # queued
     resumed = tfs("resume", "--root", str(root.path))
     assert resumed.output.startswith("resumed: ") and "item(s) queued" in resumed.output
-    assert wait_for(lambda: daemon.store.count_runs(status=RunStatus.FAILED) == 1)
+    assert settled(
+        daemon, lambda: daemon.store.count_runs(status=RunStatus.FAILED) == 1
+    )
     failed = daemon.store.query_runs(status=RunStatus.FAILED)[0]
 
     retried = tfs("retry", failed.id, "--root", str(root.path))
     assert retried.exit_code == 0, retried.output
     assert f"queued a retry of {failed.id}" in retried.output
-    assert wait_for(lambda: daemon.store.count_runs(status=RunStatus.FAILED) == 2)
+    assert settled(
+        daemon, lambda: daemon.store.count_runs(status=RunStatus.FAILED) == 2
+    )
     assert tfs("retry", "nope", "--root", str(root.path)).exit_code == 1
     ok = daemon.store.query_runs(status=RunStatus.OK)[0]
     not_failed = tfs("retry", ok.id, "--root", str(root.path))
@@ -264,7 +276,9 @@ def test_pause_resume_retry_cancel_and_rerun(root: Root, daemon: Daemon):
         "queued 1 run(s) of copy.run on 1 file(s); skipped: 1 not failed"
         in only_failed.output
     )
-    assert wait_for(lambda: daemon.store.count_runs(status=RunStatus.FAILED) == 3)
+    assert settled(
+        daemon, lambda: daemon.store.count_runs(status=RunStatus.FAILED) == 3
+    )
     assert (
         tfs("rerun", "--handler", "nope.run", "--root", str(root.path)).exit_code == 1
     )
