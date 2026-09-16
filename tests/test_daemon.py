@@ -81,7 +81,9 @@ def enable(root: Root, folder: str, script: str, *handlers: str) -> Path:
 def root(tmp_path: Path) -> Root:
     root = Root.init(tmp_path / "vault")
     Config(
-        daemon=DaemonConfig(run_warn_after_seconds=0.05, stop_timeout_seconds=0.2)
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, run_warn_after_seconds=0.05, stop_timeout_seconds=0.2
+        )
     ).write(root.config_path)
     (root.script_dir / "copy.py").write_text(textwrap.dedent(COPY), encoding="utf-8")
     write_functions(root, "copy", COPY_FUNCTIONS)
@@ -715,9 +717,9 @@ def test_the_lock_records_the_control_port(root: Root, tmp_path: Path):
     with socket_module.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    Config(daemon=DaemonConfig(port=port, stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(max_concurrent_runs=0, port=port, stop_timeout_seconds=0.5)
+    ).write(root.config_path)
     daemon = Daemon(root, control=True, ui_dir=root.path.parent / "no-dist")
     daemon.startup()
     try:
@@ -975,3 +977,21 @@ def test_run_forever_stops_on_request(root: Root):
     assert not root.lock_path.exists()
     assert not daemon.backend.is_open
     assert path.exists()
+
+
+def test_reload_reapplies_logging_with_the_console_choice(root: Root):
+    """`tfs start --log-console` re-applies [logging] on reload the way it
+    was started: the file, and the console only when asked."""
+    import logging
+
+    from tag_file_system.core import logger as core_logger
+
+    for console in (True, False):
+        daemon = Daemon(root, apply_logging=True, log_console=console)
+        try:
+            daemon.reload()
+        finally:
+            daemon.shutdown()
+        handlers = {type(h) for h in core_logger._configured}
+        assert logging.FileHandler in handlers
+        assert (logging.StreamHandler in handlers) is console

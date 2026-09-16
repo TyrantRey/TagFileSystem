@@ -51,9 +51,11 @@ def clean_modules():
 @pytest.fixture
 def root(tmp_path: Path) -> Root:
     root = Root.init(tmp_path / "vault")
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, port=free_port(), stop_timeout_seconds=0.5
+        )
+    ).write(root.config_path)
     (root.script_dir / "copy.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
     folder = root.path / "copy"
     folder.mkdir()
@@ -94,9 +96,14 @@ def client(root: Root, daemon: Daemon) -> ControlClient:
     return ControlClient(config.daemon.bind, config.daemon.port, root.read_token())
 
 
-def status_of(client: ControlClient, path: str, params: dict | None = None) -> int:
+def status_of(
+    client: ControlClient, path: str, params: dict | None = None, method: str = "GET"
+) -> int:
     try:
-        client.get(path, params)
+        if method == "POST":
+            client.post(path, params)
+        else:
+            client.get(path, params)
     except ControlError as e:
         return e.status
     return 200
@@ -365,6 +372,26 @@ def test_api_needs_the_token_and_ui_does_not(client: ControlClient):
     assert response.status == 405
 
 
+def test_default_ui_dir_honours_the_environment(
+    root: Root, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An install that is not a checkout (the Docker image, DESIGN/v0-5-0.md
+    §10.2) names the built UI through TFS_UI_DIR; a blank value is no value."""
+    from tag_file_system.services.ui import UI_DIR_ENV, default_ui_dir
+    from tag_file_system.version import REPO
+
+    assert default_ui_dir({UI_DIR_ENV: str(tmp_path / "ui")}) == tmp_path / "ui"
+    assert REPO is not None and default_ui_dir({}) == REPO / "Frontend" / "dist"
+    assert default_ui_dir({UI_DIR_ENV: "  "}) == default_ui_dir({})
+
+    monkeypatch.setenv(UI_DIR_ENV, str(tmp_path / "elsewhere"))
+    daemon = Daemon(root, control=False, poll_ms=50)  # no ui_dir: the environment
+    try:
+        assert daemon.ui_dir == tmp_path / "elsewhere"
+    finally:
+        daemon.shutdown()
+
+
 def test_ui_not_built(root: Root, tmp_path: Path):
     daemon = Daemon(root, control=True, poll_ms=50, ui_dir=tmp_path / "absent")
     daemon.startup()
@@ -394,3 +421,208 @@ def test_legacy_endpoints_keep_their_shapes(client: ControlClient):
     with pytest.raises(ControlError):
         client.get("/files", {"prefix": ".."})
     assert [r["status"] for r in files[0]["runs"]] == [RunStatus.OK.value]
+
+
+# ------------------------------------------------ operations (DESIGN §11.7)
+
+
+def test_operation_endpoints_answer_400_404_409(client: ControlClient, daemon: Daemon):
+    """The POST routes of DESIGN/v0-5-0.md §11.7 through HTTP: the JSON body,
+    the status codes, and that the UI's GET-only client never needs them."""
+    assert (
+        status_of(
+            client, "/api/v1/plan", {"path": "copy/a--photo.txt", "prefix": "copy"}
+        )
+        == 400
+    )
+    assert status_of(client, "/api/v1/plan", {"limit": 0}) == 400
+    plan = client.get("/api/v1/plan", {"prefix": "copy"})
+    assert plan["source"] == "daemon" and plan["summary"]["files"] == 2
+
+    queue = client.get("/api/v1/queue")
+    assert queue["paused"] is False and queue["in_flight"] == []
+    assert client.post("/api/v1/pause")["paused"] is True
+    assert client.get("/api/v1/status")["paused"] is True
+    assert client.post("/api/v1/resume")["paused"] is False
+
+    checks = {c["check"]: c["status"] for c in client.get("/api/v1/doctor")["checks"]}
+    assert checks["database"] == "ok" and checks["queue"] == "ok"
+
+    ok = client.get("/api/v1/runs")["items"][0]
+    with pytest.raises(ControlError) as refused:
+        client.post("/api/v1/run/retry", {"id": ok["id"]})
+    assert refused.value.status == 409 and "only a failed" in refused.value.message
+    assert status_of(client, "/api/v1/run/retry", {"id": "nope"}, method="POST") == 404
+    assert status_of(client, "/api/v1/run/retry", method="POST") == 400
+    assert (
+        status_of(client, "/api/v1/run/cancel", {"id": ok["id"]}, method="POST") == 409
+    )
+    assert status_of(client, "/api/v1/rerun", method="POST") == 400
+    dry = client.post("/api/v1/rerun", {"handler": "copy.run", "dry": True})
+    assert dry["candidates"] == 2 and dry["queued"] == 0
+    assert (
+        status_of(client, "/api/v1/rerun", {"handler": "nope.run"}, method="POST")
+        == 404
+    )
+
+    made = client.post(
+        "/api/v1/files/touch", {"path": "copy/c--photo.txt"}, body={"content": "c"}
+    )
+    assert made["created"] is True and made["file"]["tags"] == ["photo"]
+    assert made["applies"] == ["copy.run()"]
+    assert (daemon.root.path / "copy" / "c--photo.txt").read_text() == "c"
+    assert (
+        status_of(client, "/api/v1/files/touch", {"path": ".tfs/x"}, method="POST")
+        == 400
+    )
+    assert (
+        status_of(
+            client, "/api/v1/files/touch", {"path": FUNCTIONS_FILE}, method="POST"
+        )
+        == 400
+    )
+    assert (
+        status_of(
+            client,
+            "/api/v1/files/copy",
+            {"src": "copy/nope", "dst": "out"},
+            method="POST",
+        )
+        == 404
+    )
+    assert (
+        status_of(
+            client,
+            "/api/v1/files/copy",
+            {"src": "copy/c--photo.txt", "dst": "copy/a--photo.txt"},
+            method="POST",
+        )
+        == 409
+    )
+    moved = client.post(
+        "/api/v1/files/move", {"src": "copy/c--photo.txt", "dst": "out/"}
+    )
+    assert moved["path"] == "out/c--photo.txt" and moved["from"] == "copy/c--photo.txt"
+    assert client.post("/api/v1/files/mkdir", {"path": "2024--trip"}) == {
+        "path": "2024--trip",
+        "tags": ["trip"],
+    }
+    assert client.post("/api/v1/files/remove", {"path": "out/c--photo.txt"}) == {
+        "removed": ["out/c--photo.txt"]
+    }
+    assert (
+        status_of(client, "/api/v1/files/remove", {"path": "out"}, method="POST") == 400
+    )
+    # a body that is not a JSON object is a 400; the GET routes ignore none
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", daemon.config.daemon.port, timeout=5
+    )
+    try:
+        connection.request(
+            "POST",
+            "/api/v1/files/touch?path=copy/d.txt",
+            body=b"[1, 2]",
+            headers={
+                "Authorization": f"Bearer {daemon.root.read_token()}",
+                "Content-Type": "application/json",
+                "Content-Length": "6",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 400
+        assert b"JSON object" in response.read()
+    finally:
+        connection.close()
+    assert status_of(client, "/api/v1/pause") == 405  # GET on a POST route
+    assert client.post("/reload", {"yes": True})["config"] == "reloaded"
+
+
+# ---------------------------------------- the browser's writes (DESIGN §12)
+
+
+def test_upload_download_and_tags(client: ControlClient, daemon: Daemon):
+    made = client.upload(
+        "/api/v1/files/upload", {"path": "copy/c--photo.txt"}, b"hello upload"
+    )
+    assert made["created"] is True and made["size"] == 12
+    assert made["file"]["tags"] == ["photo"] and made["applies"] == ["copy.run()"]
+    assert (daemon.root.path / "copy" / "c--photo.txt").read_bytes() == b"hello upload"
+    assert not list((daemon.root.tfs_dir / "uploads").iterdir())  # nothing staged
+    run = daemon.store.query_runs(file_path="copy/c--photo.txt")[0]
+    assert run.source.value == "api" and run.status.value == "ok"
+
+    with pytest.raises(ControlError) as refused:
+        client.upload("/api/v1/files/upload", {"path": "copy/c--photo.txt"}, b"again")
+    assert refused.value.status == 409
+    replaced = client.upload(
+        "/api/v1/files/upload", {"path": "copy/c--photo.txt", "overwrite": True}, b"v2"
+    )
+    assert replaced["created"] is False and replaced["size"] == 2
+    row = daemon.backend.query_file("copy/c--photo.txt")
+    assert row is not None and row.metadata is not None and row.metadata.file_size == 2
+    for params in ({"path": "copy"}, {"path": ".tfs/x"}, {"path": FUNCTIONS_FILE}):
+        with pytest.raises(ControlError) as bad:
+            client.upload("/api/v1/files/upload", params, b"x")
+        assert bad.value.status == 400, params
+
+    body, headers = client.download(
+        "/api/v1/file/content", {"path": "copy/c--photo.txt"}
+    )
+    assert body == b"v2"
+    assert headers["Content-Type"] == "text/plain"
+    assert headers["Content-Length"] == "2"
+    disposition = headers["Content-Disposition"]
+    assert 'filename="c--photo.txt"' in disposition
+    assert "filename*=UTF-8" in disposition and disposition.endswith("c--photo.txt")
+    assert status_of(client, "/api/v1/file/content", {"path": "copy/nope.txt"}) == 404
+    assert status_of(client, "/api/v1/file/content", {"path": ".."}) == 400
+
+    detail = client.get("/api/v1/file", {"path": "copy/c--photo.txt"})
+    assert detail["name_tags"] == ["photo"]
+    tagged = client.post(
+        "/api/v1/file/tags",
+        {"path": "copy/c--photo.txt"},
+        body={"add": ["Hot", "raw"]},
+    )
+    assert tagged["added"] == ["hot", "raw"]
+    assert tagged["file"]["tags"] == ["hot", "photo", "raw"]
+    assert client.get("/api/v1/files", {"tag": ["hot"]})["total"] == 1
+    untagged = client.post(
+        "/api/v1/file/tags", {"path": "copy/c--photo.txt", "remove": ["hot", "photo"]}
+    )
+    assert untagged["removed"] == ["hot"] and untagged["kept"] == ["photo"]
+    assert untagged["file"]["tags"] == ["photo", "raw"]
+    for params in (
+        {"path": "copy/c--photo.txt"},  # nothing to do
+        {"path": "copy/c--photo.txt", "add": ["a/b"]},  # illegal
+    ):
+        assert status_of(client, "/api/v1/file/tags", params, method="POST") == 400
+    assert (
+        status_of(
+            client,
+            "/api/v1/file/tags",
+            {"path": "copy/nope.txt", "add": ["x"]},
+            method="POST",
+        )
+        == 404
+    )
+    # a raw route with a bad length is refused (http.client adds a
+    # Content-Length of its own, so the header is given by hand)
+    connection = http.client.HTTPConnection(
+        "127.0.0.1", daemon.config.daemon.port, timeout=5
+    )
+    try:
+        connection.request(
+            "POST",
+            "/api/v1/files/upload?path=copy/never.txt",
+            headers={
+                "Authorization": f"Bearer {daemon.root.read_token()}",
+                "Content-Length": "abc",
+            },
+        )
+        response = connection.getresponse()
+        assert response.status == 400 and b"Content-Length" in response.read()
+    finally:
+        connection.close()
+    assert not (daemon.root.path / "copy" / "never.txt").exists()
+    assert status_of(client, "/api/v1/files/upload") == 405

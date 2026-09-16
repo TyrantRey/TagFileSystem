@@ -51,9 +51,11 @@ def root(tmp_path: Path) -> Root:
     result = runner.invoke(app, ["init", str(tmp_path / "vault")])
     assert result.exit_code == 0, result.output
     root = Root(tmp_path / "vault")
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, port=free_port(), stop_timeout_seconds=0.5
+        )
+    ).write(root.config_path)
     (root.script_dir / "copy.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
     (root.path / "copy" / "a--photo.txt").parent.mkdir()
     (root.path / "copy" / "a--photo.txt").write_text("a")
@@ -214,9 +216,11 @@ def test_start_detached_reports_a_child_that_dies(root: Root, daemon: Daemon):
     while daemon.backend.is_open and time.time() < deadline:
         time.sleep(0.05)
     config = root.load_config()
-    Config(daemon=DaemonConfig(bind="203.0.113.1", port=config.daemon.port)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, bind="203.0.113.1", port=config.daemon.port
+        )
+    ).write(root.config_path)
 
     result = tfs("start", "-d", "--root", str(root.path))
 
@@ -261,9 +265,11 @@ def test_stop_reaches_the_daemon_after_the_config_port_changed(
     root: Root, daemon: Daemon
 ):
     config = root.load_config()
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, port=free_port(), stop_timeout_seconds=0.5
+        )
+    ).write(root.config_path)
     holder = Lock(root).holder()
     assert holder is not None and holder.port == config.daemon.port
 
@@ -304,9 +310,11 @@ def test_stop_is_graceful_for_an_ipv6_daemon(root: Root):
             port = s.getsockname()[1]
     except OSError:
         pytest.skip("no IPv6 loopback here")
-    Config(daemon=DaemonConfig(bind="::1", port=port, stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, bind="::1", port=port, stop_timeout_seconds=0.5
+        )
+    ).write(root.config_path)
     d = Daemon(root, control=True, poll_ms=50, ui_dir=root.path.parent / "no-dist")
     d.startup()
     thread = threading.Thread(target=d.run_forever, daemon=True)
@@ -414,6 +422,55 @@ def test_start_foreground_runs_until_stopped(root: Root):
     assert not thread.is_alive()
     assert box["result"].exit_code == 0, box["result"].output
     assert "watching" in box["result"].output and "stopped" in box["result"].output
+    assert not root.lock_path.exists()
+
+
+def test_start_log_console_writes_the_log_to_the_console_too(root: Root):
+    """`tfs start --log-console` (Docker, a service manager that collects the
+    console): the log keeps going to [logging] file and reaches stdout as
+    well (DESIGN/v0-5-0.md §10.3)."""
+    import logging
+
+    from tag_file_system.core import logger as core_logger
+    from tag_file_system.services.control import ControlClient
+
+    config = root.load_config()
+    client = ControlClient(
+        config.daemon.bind, config.daemon.port, root.read_token(), timeout=2
+    )
+    box: dict = {}
+
+    def run() -> None:
+        box["result"] = tfs("start", "--log-console", "--root", str(root.path))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            if client.health()["started"]:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("daemon did not come up")
+    handlers = {type(h) for h in core_logger._configured}
+
+    client.stop()
+    thread.join(15)
+
+    assert not thread.is_alive()
+    assert box["result"].exit_code == 0, box["result"].output
+    assert "logging to" in box["result"].output
+    assert "and the console" in box["result"].output
+    assert handlers == {logging.FileHandler, logging.StreamHandler}
+    assert (root.path / config.logging.file).read_text(encoding="utf-8")
+
+
+def test_start_log_console_is_foreground_only(root: Root):
+    result = tfs("start", "-d", "--log-console", "--root", str(root.path))
+    assert result.exit_code == 2
+    assert "--log-console" in result.output and "drop -d" in result.output
     assert not root.lock_path.exists()
 
 

@@ -48,9 +48,11 @@ def clean_modules():
 @pytest.fixture
 def root(tmp_path: Path) -> Root:
     root = Root.init(tmp_path / "vault")
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, port=free_port(), stop_timeout_seconds=0.5
+        )
+    ).write(root.config_path)
     (root.script_dir / "copy.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
     (root.path / "copy" / "a--photo.txt").parent.mkdir()
     (root.path / "copy" / "a--photo.txt").write_text("a")

@@ -75,9 +75,11 @@ def root(tmp_path: Path) -> Root:
     result = tfs("init", str(tmp_path / "vault"))
     assert result.exit_code == 0, result.output
     root = Root(tmp_path / "vault")
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, port=free_port(), stop_timeout_seconds=0.5
+        )
+    ).write(root.config_path)
     write(root.script_dir / "photo.py", PHOTO)
     write(
         root.path / "own" / FUNCTIONS_FILE,

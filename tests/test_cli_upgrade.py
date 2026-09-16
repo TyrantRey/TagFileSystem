@@ -39,7 +39,9 @@ def root(tmp_path: Path) -> Root:
     result = tfs("init", str(tmp_path / "vault"))
     assert result.exit_code == 0, result.output
     root = Root(tmp_path / "vault")
-    Config(daemon=DaemonConfig(port=free_port())).write(root.config_path)
+    Config(daemon=DaemonConfig(max_concurrent_runs=0, port=free_port())).write(
+        root.config_path
+    )
     return root
 
 

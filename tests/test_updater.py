@@ -315,9 +315,9 @@ def test_stale_marker_is_taken_over_with_a_warning(root: Root):
 
 
 def test_inspect_root_reads_lock_config_and_schema(root: Root):
-    Config(daemon=DaemonConfig(port=7999, stop_timeout_seconds=3)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(max_concurrent_runs=0, port=7999, stop_timeout_seconds=3)
+    ).write(root.config_path)
     state = updater.inspect_root(root.path)
     assert (state.running, state.port, state.stop_timeout) == (False, 7999, 3.0)
     assert (state.user_version, state.skipped, state.upgrading) == (
