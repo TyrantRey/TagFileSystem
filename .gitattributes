@@ -1,0 +1,4 @@
+# Code by AkinoAlice@TyrantRey
+# Files the container runs must keep LF whatever the checkout's platform.
+docker/entrypoint.sh text eol=lf
+Dockerfile text eol=lf

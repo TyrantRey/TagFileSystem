@@ -67,9 +67,76 @@ MAX_RETRIES = 5  # a problem handler retrying in a loop stops here
 _current = threading.local()  # .stack: list[RunHandle] this thread works for
 
 
+class RateLimiter:
+    """A token bucket of ``per_minute`` run starts (DESIGN/v0-5-0.md §11.3):
+    ``acquire`` sleeps until a token is free. ``0`` is unlimited."""
+
+    def __init__(
+        self,
+        per_minute: int = 0,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._lock = threading.Lock()
+        self._clock = clock
+        self._sleep = sleep
+        self.capacity = 0
+        self._tokens = 0.0
+        self._updated = clock()
+        self.configure(per_minute)
+
+    def configure(self, per_minute: int) -> None:
+        with self._lock:
+            self.capacity = max(0, int(per_minute))
+            self._tokens = float(self.capacity)
+            self._updated = self._clock()
+
+    def acquire(self) -> float:
+        """Take one token; returns how long it waited."""
+        waited = 0.0
+        while True:
+            with self._lock:
+                if self.capacity <= 0:
+                    return waited
+                now = self._clock()
+                self._tokens = min(
+                    float(self.capacity),
+                    self._tokens + (now - self._updated) * self.capacity / 60.0,
+                )
+                self._updated = now
+                if self._tokens + 1e-9 >= 1.0:  # 30 × (2/60) is 0.999…: a token
+                    self._tokens = max(0.0, self._tokens - 1.0)
+                    return waited
+                pause = (1.0 - self._tokens) * 60.0 / self.capacity
+            pause = min(max(pause, 0.001), 1.0)
+            self._sleep(pause)
+            waited += pause
+
+
+class RetryRefused(Exception):
+    """Why a run cannot be retried (DESIGN §4.5): the problem kind, its
+    message and its severity, for whoever asked to record or to answer."""
+
+    def __init__(self, kind: str, message: str, severity: Severity) -> None:
+        super().__init__(message)
+        self.kind = kind
+        self.message = message
+        self.severity = severity
+
+
 def _current_handle() -> RunHandle | None:
     stack = getattr(_current, "stack", None)
     return stack[-1] if stack else None
+
+
+def _stat_of(path: Path) -> tuple[int, int] | None:
+    """``(size, mtime_ns)`` of a file, ``None`` when it cannot be stat-ed."""
+    try:
+        stat = Path(path).stat()
+    except OSError:
+        return None
+    return (stat.st_size, stat.st_mtime_ns)
 
 
 def _push(handle: RunHandle) -> None:
@@ -186,7 +253,15 @@ class ActionRunner:
         self._lock = threading.RLock()
         self._dispatching = threading.local()
         self._reported_parse_problems: set[tuple[str, str]] = set()
+        # Every run start that is not a lifecycle hook takes a token
+        # (DESIGN/v0-5-0.md §11.3).
+        self.limiter = RateLimiter(self.config.daemon.max_runs_per_minute)
         self._install_capture()
+
+    def apply_config(self, config: Config) -> None:
+        """A reloaded ``config.toml``: the limits follow it."""
+        self.config = config
+        self.limiter.configure(config.daemon.max_runs_per_minute)
 
     # ---------------------------------------------------------- entry points
 
@@ -207,13 +282,16 @@ class ActionRunner:
         source: RunSource = RunSource.WATCH,
         parent: RunHandle | None = None,
         moved: bool = False,
+        rerun: bool = False,
     ) -> list[RunRecord]:
         """Run ``hook`` of every configured handler in ``entries`` — by
         default everything in scope for ``file`` — parent first. ``moved``
         marks a REMOVED event caused by the file leaving scope rather than
         being deleted. On ADDED the ``tagged`` marks of a configured handler
         fire too when the file carries their tag: entering scope with the tag
-        on is a trigger (DESIGN/v0-4-0.md §5)."""
+        on is a trigger (DESIGN/v0-4-0.md §5). ``rerun`` starts a run even
+        where the key has a final one — as a retry of it — and skips the
+        provenance guard (DESIGN/v0-5-0.md §11.3, `tfs rerun`)."""
         hook = Hook(hook)
         if hook is Hook.TAGGED or hook.is_lifecycle:
             raise ValueError(f"{hook.value} is not a file hook")
@@ -242,22 +320,49 @@ class ActionRunner:
             for handler in marks:
                 if hook is Hook.REMOVED and moved and not handler.spec.on_move:
                     continue
-                args: dict[str, Any] = dict(entry.args)
-                if handler.hook is Hook.TAGGED:
-                    args = {"tag": handler.spec.tag, **args}
-                run = self._execute(
+                run = self.run_mark(
                     handler,
-                    handler.hook,
-                    args=args,
-                    slug=display(entry.script, entry.handler, args),
-                    path=path,
-                    file=file,
+                    applied,
+                    path,
+                    file,
                     source=source,
                     parent=parent,
+                    rerun=rerun,
                 )
                 if run is not None:
                     runs.append(run)
         return runs
+
+    def run_mark(
+        self,
+        handler: FileHandler,
+        applied: Applied,
+        path: Path,
+        file: TaggedFile,
+        *,
+        source: RunSource = RunSource.WATCH,
+        parent: RunHandle | None = None,
+        rerun: bool = False,
+    ) -> RunRecord | None:
+        """One mark of one configured entry on one file: the entry's arguments
+        (plus ``tag`` for a tagged mark), keyed and run through ``_execute``.
+        What ``on_file`` does per mark, and what ``tfs rerun`` does per
+        candidate (DESIGN/v0-5-0.md §11.3)."""
+        entry = applied.entry
+        args: dict[str, Any] = dict(entry.args)
+        if handler.hook is Hook.TAGGED:
+            args = {"tag": handler.spec.tag, **args}
+        return self._execute(
+            handler,
+            handler.hook,
+            args=args,
+            slug=display(entry.script, entry.handler, args),
+            path=path,
+            file=file,
+            source=source,
+            parent=parent,
+            rerun=rerun,
+        )
 
     def on_tag(
         self,
@@ -455,8 +560,13 @@ class ActionRunner:
         )
         return False
 
-    def retry(self, run_id: str) -> RunRecord | None:
-        """Start a fresh run for a failed/interrupted run (DESIGN §4.5)."""
+    def _retry_target(
+        self, run_id: str
+    ) -> tuple[RunRecord, TaggedFile, list[FileHandler]] | None:
+        """What a retry of ``run_id`` would run: the run, its file and the
+        marks to call. ``None`` when the run is unknown or not failed /
+        interrupted (nothing to retry); ``RetryRefused`` when it cannot be
+        retried (DESIGN §4.5, DESIGN/v0-4-0.md §7)."""
         previous = self.store.get_run(run_id)
         if previous is None or previous.status not in (
             RunStatus.FAILED,
@@ -464,47 +574,34 @@ class ActionRunner:
         ):
             return None
         if previous.hook.is_lifecycle:
-            self.problem(
-                Severity.WARN,
+            raise RetryRefused(
                 "retry.lifecycle",
                 f"run {run_id} is the {previous.hook.value} run of "
                 f"{previous.action_name}: a lifecycle hook happens once per "
                 f"daemon session and is not retried",
-                action_name=previous.action_name,
-                run_id=run_id,
-            )
-            return None
-        if self._retry_depth(previous) >= MAX_RETRIES:
-            self.problem(
                 Severity.WARN,
+            )
+        if self._retry_depth(previous) >= MAX_RETRIES:
+            raise RetryRefused(
                 "retry.limit",
                 f"run {run_id} of {previous.action_name} has already been retried "
                 f"{MAX_RETRIES} times; not retrying again",
-                action_name=previous.action_name,
-                run_id=run_id,
+                Severity.WARN,
             )
-            return None
         file = self._file_for(previous)
         if file is None or not file.original_path.is_file():
-            self.problem(
-                Severity.ERR,
+            raise RetryRefused(
                 "retry.file_missing",
                 f"cannot retry {run_id}: its file is no longer in the root",
-                action_name=previous.action_name,
-                run_id=run_id,
+                Severity.ERR,
             )
-            return None
         addon = self.loader.addon_for(previous.action_name)
         if addon is None:
-            self.problem(
-                Severity.ERR,
+            raise RetryRefused(
                 "action.unbound",
                 f"cannot retry {run_id}: add-on {previous.action_name} is not loaded",
-                action_name=previous.action_name,
-                run_id=run_id,
+                Severity.ERR,
             )
-            return None
-        path = file.original_path
         # The run's own arguments are the key (DESIGN/v0-4-0.md §7): a handler
         # whose parameters no longer fit them cannot be retried under it.
         handlers = [h for h in addon.named(previous.handler) if h.hook is previous.hook]
@@ -513,8 +610,7 @@ class ActionRunner:
             m for h in handlers[:1] for m in check(h.func, params)
         ]  # the marks share one function
         if not handlers or unfit:
-            self.problem(
-                Severity.ERR,
+            raise RetryRefused(
                 "retry.key_changed",
                 f"cannot retry {run_id}: {previous.action_name}."
                 f"{previous.handler or '?'} "
@@ -523,10 +619,35 @@ class ActionRunner:
                     if not handlers
                     else "no longer takes its arguments (" + "; ".join(unfit) + ")"
                 ),
-                action_name=previous.action_name,
-                run_id=run_id,
+                Severity.ERR,
             )
+        return previous, file, handlers
+
+    def retry_check(self, run_id: str) -> str | None:
+        """Why ``retry(run_id)`` would refuse, or ``None`` when it would run
+        (`tfs retry` asks before queueing; nothing is recorded)."""
+        try:
+            target = self._retry_target(run_id)
+        except RetryRefused as refused:
+            return refused.message
+        if target is None:
+            run = self.store.get_run(run_id)
+            if run is None:
+                return f"unknown run {run_id}"
+            return f"run {run_id} is {run.status.value}; only a failed or interrupted run is retried"
+        return None
+
+    def retry(self, run_id: str) -> RunRecord | None:
+        """Start a fresh run for a failed/interrupted run (DESIGN §4.5)."""
+        try:
+            target = self._retry_target(run_id)
+        except RetryRefused as refused:
+            self.problem_from(refused, self.store.get_run(run_id), run_id)
             return None
+        if target is None:
+            return None
+        previous, file, handlers = target
+        path = file.original_path
         for handler in handlers:
             try:
                 run = self._execute(
@@ -631,10 +752,12 @@ class ActionRunner:
         source: RunSource,
         parent: RunHandle | None,
         retry_of: str | None = None,
+        rerun: bool = False,
     ) -> RunRecord | None:
         """One handler, one file, one hook: key it, skip it if the key has a
         run, bind ``args`` (the entry's own values, plus ``tag`` for a tagged
-        hook) and invoke."""
+        hook) and invoke. ``rerun``: a final run under the key is retried
+        rather than honoured, and the provenance guard does not apply."""
         addon = handler.addon
         record = self._action_record(addon)
         abs_path = self._abs(path)
@@ -649,10 +772,15 @@ class ActionRunner:
             args=args,
         )
         if retry_of is None:
-            if self.store.find_run(key) is not None:
-                return None
-            if hook in (Hook.ADDED, Hook.MODIFIED) and self._produced_by(
-                path, addon.name
+            existing = self.store.find_run(key)
+            if existing is not None:
+                if not rerun or not existing.status.is_final:
+                    return None
+                retry_of = existing.id  # the operator asked: run it again
+            elif (
+                not rerun
+                and hook in (Hook.ADDED, Hook.MODIFIED)
+                and self._produced_by(path, addon.name)
             ):
                 return None  # a generated file never re-triggers its producer
 
@@ -717,6 +845,8 @@ class ActionRunner:
         """Start the run, call the handler with its output captured into the
         trace, and finish it. Everything a lifecycle run shares with a file
         run is here; only ``call`` knows the handler's shape."""
+        if not key.hook.is_lifecycle:
+            self.limiter.acquire()  # the rate limit, chained runs included
         try:
             run = self.store.start_run(
                 record,
@@ -732,6 +862,9 @@ class ActionRunner:
 
         handle = RunHandle(run=run, depth=parent.depth + 1 if parent else 0)
         handle.sink = lambda line, h=handle: self.trace(h, TraceKind.LOG, line)
+        handle.thread = threading.current_thread()
+        if path is not None and not key.hook.is_lifecycle:
+            handle.input_stat = _stat_of(path)
         with self._lock:
             self.in_flight[run.id] = handle
         ctx = ActionContext(self, handle, file, path, args)
@@ -771,7 +904,13 @@ class ActionRunner:
         status: RunStatus,
         result: Any = None,
         error: str | None = None,
+        *,
+        kind: str | None = None,
+        severity: Severity | None = None,
     ) -> RunRecord | None:
+        """End the run. ``kind``/``severity`` replace the problem a status
+        normally raises (a cancel is ``interrupted`` but P2 ``run.cancelled``,
+        a timeout ``failed`` but ``run.timeout``)."""
         with handle.lock:
             if handle.finished:
                 return None
@@ -800,6 +939,17 @@ class ActionRunner:
             return run  # interrupted/failed meanwhile: that problem was raised then
         file_path = self._path_of_run(run)
         subject = self._subject(run, file_path)
+        self._note_self_modification(handle, file_path)
+        if kind is not None:
+            self.problem(
+                severity if severity is not None else Severity.WARN,
+                kind,
+                f"{run.action_name} on {subject}: {error or status.value}",
+                action_name=run.action_name,
+                file_path=file_path,
+                run_id=run.id,
+            )
+            return run
         if status is RunStatus.OK:
             self.problem(
                 Severity.INFO,
@@ -829,6 +979,80 @@ class ActionRunner:
                 run_id=run.id,
             )
         return run
+
+    def _note_self_modification(
+        self, handle: RunHandle, file_path: Path | None
+    ) -> None:
+        """A run that changed the file it was called on is its producer
+        (DESIGN/v0-5-0.md §11.3, race 2): ``emitted`` provenance on its own
+        input, so the change the watcher is about to deliver does not
+        re-trigger the add-on — an in-place edit cannot loop."""
+        if handle.input_stat is None or file_path is None:
+            return
+        now = _stat_of(file_path)
+        if now is None or now == handle.input_stat:
+            return
+        key = self._key_or_none(file_path)
+        if key is None:
+            return
+        try:
+            self.store.add_provenance(key, handle.id, ProvenanceKind.EMITTED)
+        except KeyError:
+            return  # the row is gone (the handler moved it): nothing to guard
+        self.trace(
+            handle,
+            TraceKind.SELF_MODIFIED,
+            {"path": key, "size": now[0], "mtime_ns": now[1]},
+        )
+
+    def cancel(
+        self,
+        run_id: str,
+        reason: str = "cancelled by the operator",
+        *,
+        status: RunStatus = RunStatus.INTERRUPTED,
+        kind: str = "run.cancelled",
+        severity: Severity = Severity.WARN,
+    ) -> RunHandle | None:
+        """End a run in flight (DESIGN/v0-5-0.md §11.3): its record is final
+        now, its handle is marked so the handler's next ``ctx`` call raises
+        ``Cancelled``. Returns the handle (its thread is what a worker pool
+        abandons), or ``None`` when no such run is in flight."""
+        with self._lock:
+            handle = self.in_flight.get(run_id)
+        if handle is None or handle.finished:
+            return None
+        handle.cancelled = True
+        self._finish(handle, status, error=reason, kind=kind, severity=severity)
+        return handle
+
+    def check_timeouts(self) -> list[RunHandle]:
+        """Fail every file run older than ``run_timeout_seconds`` (0: never);
+        the caller abandons their threads. A lifecycle run is never timed
+        out: a service started in ``on_start`` lives as long as the session."""
+        timeout = self.config.daemon.run_timeout_seconds
+        if timeout <= 0:
+            return []
+        with self._lock:
+            handles = list(self.in_flight.values())
+        expired: list[RunHandle] = []
+        for handle in handles:
+            if (
+                handle.finished
+                or handle.run.hook.is_lifecycle
+                or handle.elapsed <= timeout
+            ):
+                continue
+            cancelled = self.cancel(
+                handle.id,
+                f"timed out after {timeout:g}s",
+                status=RunStatus.FAILED,
+                kind="run.timeout",
+                severity=Severity.ERR,
+            )
+            if cancelled is not None:
+                expired.append(cancelled)
+        return expired
 
     # ------------------------------------------------------------- capture
 
@@ -1175,6 +1399,15 @@ class ActionRunner:
     def _abs(self, path: Path | PurePosixPath | str) -> Path:
         p = Path(path)
         return p if p.is_absolute() else self.root.absolute(PurePosixPath(p.as_posix()))
+
+    def problem_from(self, refused: RetryRefused, run: RunRecord | None, run_id: str):
+        return self.problem(
+            refused.severity,
+            refused.kind,
+            refused.message,
+            action_name=run.action_name if run is not None else None,
+            run_id=run_id,
+        )
 
     def _key_or_none(self, path: Path | PurePosixPath | str | None) -> str | None:
         if path is None:

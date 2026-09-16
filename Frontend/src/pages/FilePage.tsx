@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
+import { ApiError, apiBlob } from "../api/client";
 import type { Explain, FileDetail, FileHistory } from "../api/types";
 import { useApi } from "../api/useApi";
 import {
@@ -11,8 +13,43 @@ import {
   TagChips,
   When,
 } from "../components/bits";
+import { TagEditor } from "../components/TagEditor";
 import { Timeline } from "../components/Timeline";
 import { bytes, folderOf, short } from "../lib/fmt";
+
+/** Fetch the bytes with the token and hand them to the browser as a file
+ * (DESIGN/v0-5-0.md §12.2: the token never rides in a URL). */
+function DownloadButton({ path, name }: { path: string; name: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const download = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const { blob, filename } = await apiBlob("/file/content", { path });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename ?? name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <button type="button" disabled={busy} onClick={() => void download()}>
+        {busy ? "Downloading…" : "Download"}
+      </button>
+      {error && <span className="err"> {error}</span>}
+    </>
+  );
+}
 
 function Explained({ explain }: { explain: Explain }) {
   return (
@@ -153,6 +190,9 @@ export function FilePage() {
         >
           in {folderOf(path)}
         </Link>
+        {f && f.status !== "deleted" && (
+          <DownloadButton path={path} name={path.split("/").pop() ?? path} />
+        )}
       </PageHeader>
       {detail.error && <ErrorBox error={detail.error} />}
       {!f && !detail.error && <Loading />}
@@ -161,7 +201,20 @@ export function FilePage() {
           <dl className="fields">
             <dt>Tags</dt>
             <dd>
-              <TagChips tags={f.tags} />
+              {f.status === "deleted" ? (
+                <TagChips tags={f.tags} />
+              ) : (
+                <TagEditor
+                  path={path}
+                  tags={f.tags}
+                  nameTags={f.name_tags ?? []}
+                  onChanged={() => {
+                    detail.reload();
+                    explain.reload();
+                    history.reload();
+                  }}
+                />
+              )}
             </dd>
             <dt>Status</dt>
             <dd>

@@ -13,6 +13,16 @@ import {
 } from "../components/bits";
 import { short } from "../lib/fmt";
 
+function uptime(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
 export function StatusPage() {
   const status = useApi<Status>("/status");
   const upgrades = useApi<Upgrades>("/upgrades", { limit: 10 });
@@ -36,9 +46,59 @@ export function StatusPage() {
             <dd className="mono">{s.root}</dd>
             <dt>Daemon</dt>
             <dd>
-              <Badge value={s.status} /> pid {s.pid}
+              <Badge value={s.paused ? "paused" : s.status} /> pid {s.pid}
               {s.started ? "" : " (starting)"}
+              {s.uptime_seconds !== undefined && (
+                <span className="muted">, up {uptime(s.uptime_seconds)}</span>
+              )}
             </dd>
+            {s.queue && (
+              <>
+                <dt>Queue</dt>
+                <dd>
+                  {s.queue.depth} waiting, {s.queue.active} running,{" "}
+                  {s.queue.workers} worker{s.queue.workers === 1 ? "" : "s"}
+                  {s.paused && (
+                    <>
+                      {" "}
+                      — <Badge value="paused" /> run <code>tfs resume</code>
+                    </>
+                  )}
+                </dd>
+              </>
+            )}
+            {s.runs && (
+              <>
+                <dt>Runs</dt>
+                <dd>
+                  <Link to="/runs?status=failed">{s.runs.failed} failed</Link>,{" "}
+                  {s.runs.interrupted} interrupted
+                  {s.files !== undefined && (
+                    <span className="muted">; {s.files} files indexed</span>
+                  )}
+                </dd>
+              </>
+            )}
+            {s.drift && s.drift.length > 0 && (
+              <>
+                <dt>Drift</dt>
+                <dd>
+                  <Badge value="warn" /> {s.drift.join(", ")} changed on disk:{" "}
+                  <code>tfs plan</code>, then <code>tfs reload</code>
+                </dd>
+              </>
+            )}
+            {s.limits && (
+              <>
+                <dt>Limits</dt>
+                <dd className="mono">
+                  max_concurrent_runs {s.limits.max_concurrent_runs},
+                  max_runs_per_minute {s.limits.max_runs_per_minute || "∞"},
+                  run_timeout_seconds {s.limits.run_timeout_seconds || "none"},
+                  confirm_above {s.limits.confirm_above || "off"}
+                </dd>
+              </>
+            )}
             <dt>Version</dt>
             <dd>
               {s.version ?? "?"}{" "}

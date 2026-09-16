@@ -14,6 +14,7 @@ route: the CLI's own (``/health``, ``/stop``, ``/reload``, ``/actions``,
 
 import ipaddress
 import json
+import shutil
 import socket
 import threading
 import urllib.error
@@ -29,7 +30,10 @@ from tag_file_system.services.api import (  # noqa: F401 - re-exported for the C
     API_PREFIX,
     Api,
     BadRequest,
+    Conflict,
+    FileResponse,
     NotFound,
+    RawHandler,
     file_payload,
     jsonable,
     parse_file_filters,
@@ -42,6 +46,8 @@ from tag_file_system.version import COMMIT, VERSION
 
 if TYPE_CHECKING:  # pragma: no cover
     from tag_file_system.services.daemon import Daemon
+
+BODY_MAX = 16 * 1024 * 1024  # a `tfs touch --content` is small; a file is not
 
 
 class ControlError(Exception):
@@ -116,6 +122,7 @@ class ControlServer:
             ("GET", "/explain"): self._explain,
             **self.api.routes(),
         }
+        self._raw_routes: dict[tuple[str, str], RawHandler] = self.api.raw_routes()
         server_ref = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -165,6 +172,29 @@ class ControlServer:
                 if method == "GET":
                     self.wfile.write(data)
 
+            def _read_body(self, query: dict[str, list[str]]) -> None:
+                """A JSON object body (``touch``'s content, DESIGN/v0-5-0.md
+                §11.7) joins the query: strings as they are, other values as
+                JSON text. The query wins on a clash."""
+                length = int(self.headers.get("Content-Length") or 0)
+                if length <= 0:
+                    return
+                if length > BODY_MAX:
+                    raise BadRequest(f"body larger than {BODY_MAX} bytes")
+                raw = self.rfile.read(length)
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    raise BadRequest("body must be a JSON object") from None
+                if not isinstance(data, dict):
+                    raise BadRequest("body must be a JSON object")
+                for key, value in data.items():
+                    if key in query:
+                        continue
+                    query[str(key)] = [
+                        value if isinstance(value, str) else json.dumps(value)
+                    ]
+
             def send_error(
                 self, code: int, message: str | None = None, explain: str | None = None
             ) -> None:
@@ -191,18 +221,63 @@ class ControlServer:
                     return
                 query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
                 try:
-                    status, body = server_ref.dispatch(method, path, query)
+                    raw = server_ref.raw_handler(method, path)
+                    if raw is not None:
+                        # The body is the payload (an upload): the handler
+                        # streams it; nothing is read into memory here.
+                        length_text = self.headers.get("Content-Length")
+                        if length_text is None:
+                            raise BadRequest("Content-Length is required")
+                        try:
+                            length = int(length_text)
+                        except ValueError:
+                            raise BadRequest(
+                                "Content-Length must be an integer"
+                            ) from None
+                        status, body = HTTPStatus.OK, raw(query, self.rfile, length)
+                    else:
+                        self._read_body(query)
+                        status, body = server_ref.dispatch(method, path, query)
                 except BadRequest as e:
                     status, body = HTTPStatus.BAD_REQUEST, {"error": str(e)}
                 except NotFound as e:
                     status, body = HTTPStatus.NOT_FOUND, {"error": str(e)}
+                except Conflict as e:
+                    status, body = HTTPStatus.CONFLICT, {"error": str(e)}
                 except Exception as e:  # never let a handler kill the server
                     server_ref.logger.exception("control request failed")
                     status, body = (
                         HTTPStatus.INTERNAL_SERVER_ERROR,
                         {"error": f"{type(e).__name__}: {e}"},
                     )
-                self._send(status, body)
+                if isinstance(body, FileResponse):
+                    self._send_file(body, method)
+                else:
+                    self._send(status, body)
+
+            def _send_file(self, file: FileResponse, method: str) -> None:
+                """A download (DESIGN/v0-5-0.md §12.2): streamed, never read
+                whole; the name in both the plain and the RFC 5987 form."""
+                ascii_name = (
+                    file.filename.encode("ascii", "replace")
+                    .decode("ascii")
+                    .replace('"', "'")
+                )
+                quoted = urllib.parse.quote(file.filename, safe="")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", file.content_type)
+                self.send_header("Content-Length", str(file.size))
+                self.send_header(
+                    "Content-Disposition",
+                    f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}",
+                )
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                if method == "HEAD":
+                    return
+                with file.path.open("rb") as handle:
+                    shutil.copyfileobj(handle, self.wfile, 1 << 20)
 
             def do_GET(self) -> None:  # noqa: N802
                 self._route("GET")
@@ -250,12 +325,16 @@ class ControlServer:
 
     # ------------------------------------------------------------- routes
 
+    def raw_handler(self, method: str, path: str) -> RawHandler | None:
+        """The handler that reads the body itself, if this is such a route."""
+        return self._raw_routes.get((method, path))
+
     def dispatch(
         self, method: str, path: str, query: dict[str, list[str]]
     ) -> tuple[HTTPStatus, Any]:
         handler = self._routes.get((method, path))
         if handler is None:
-            known = {p for _, p in self._routes}
+            known = {p for _, p in self._routes} | {p for _, p in self._raw_routes}
             if path in known:
                 return HTTPStatus.METHOD_NOT_ALLOWED, {
                     "error": f"{method} not allowed on {path}"
@@ -275,7 +354,11 @@ class ControlServer:
         return {"stopping": True}
 
     def _reload(self, query: dict[str, list[str]]) -> dict[str, Any]:
-        return self.daemon.reload()
+        """``?yes=1`` consents to a reload above ``confirm_above``
+        (DESIGN/v0-5-0.md §11.3)."""
+        return self.daemon.reload(
+            yes=parse_flag("yes", (query.get("yes") or [None])[0])
+        )
 
     def _explain(self, query: dict[str, list[str]]) -> dict[str, Any]:
         """``tfs explain``: ``?path=<root-relative file>``."""
@@ -312,7 +395,14 @@ class ControlClient:
         self.timeout = timeout
 
     def _call(
-        self, method: str, path: str, params: dict[str, Any] | None = None
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+        timeout: float | None = None,
+        raw: bytes | None = None,
+        binary: bool = False,
     ) -> Any:
         url = self.base + path
         if params:
@@ -326,11 +416,21 @@ class ControlClient:
                     pairs.append((key, "1" if value is True else str(value)))
             if pairs:
                 url += "?" + urllib.parse.urlencode(pairs)
-        request = urllib.request.Request(
-            url, method=method, headers={"Authorization": f"Bearer {self.token}"}
-        )
+        headers = {"Authorization": f"Bearer {self.token}"}
+        data = None
+        if raw is not None:
+            data = raw
+            headers["Content-Type"] = "application/octet-stream"
+        elif body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        request = urllib.request.Request(url, data=data, method=method, headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout if timeout is None else timeout
+            ) as response:
+                if binary:
+                    return response.read(), dict(response.headers.items())
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             try:
@@ -347,16 +447,49 @@ class ControlClient:
     def stop(self) -> dict[str, Any]:
         return self._call("POST", "/stop")
 
-    def reload(self) -> dict[str, Any]:
-        return self._call("POST", "/reload")
+    def reload(self, yes: bool = False) -> dict[str, Any]:
+        # A reload reconciles the whole root before it answers; with no
+        # workers that includes the runs it starts. Wait for it.
+        return self._call("POST", "/reload", {"yes": yes}, timeout=600.0)
 
     def actions(self) -> dict[str, Any]:
         """``{"actions": [...], "problems": [...]}``."""
         return self._call("GET", "/actions")
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
         """Any ``GET`` — the versioned API (``/api/v1/...``) included."""
-        return self._call("GET", path, params)
+        return self._call("GET", path, params, timeout=timeout)
+
+    def post(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
+        """Any ``POST`` of the API (DESIGN/v0-5-0.md §11.7)."""
+        return self._call("POST", path, params, body, timeout=timeout)
+
+    def upload(
+        self,
+        path: str,
+        params: dict[str, Any] | None,
+        data: bytes,
+        timeout: float | None = None,
+    ) -> Any:
+        """``POST`` with the bytes as the body (DESIGN/v0-5-0.md §12.1)."""
+        return self._call("POST", path, params, raw=data, timeout=timeout)
+
+    def download(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> tuple[bytes, dict[str, str]]:
+        """A ``GET`` answered as bytes: ``(body, headers)``."""
+        return self._call("GET", path, params, binary=True)
 
     def explain(self, path: str) -> dict[str, Any]:
         """What applies to one file and why (DESIGN/v0-4-0.md §9)."""

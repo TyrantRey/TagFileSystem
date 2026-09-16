@@ -1,7 +1,9 @@
-// One GET against the daemon's versioned API (DESIGN/v0-5-0.md §2): the
-// session's token as a bearer, JSON back, `{"error": ...}` bodies raised as
-// ApiError(status). Nothing here ever issues another verb: the dashboard is
-// read-only by construction.
+// The calls against the daemon's versioned API (DESIGN/v0-5-0.md §2, §12):
+// the session's token as a bearer on every one, `{"error": ...}` bodies
+// raised as ApiError(status). Four shapes and no more: `api` (GET JSON),
+// `apiPost` (POST JSON), `apiUpload` (POST bytes), `apiBlob` (GET bytes).
+// The dashboard reads with the first; the upload box, the tag editor and
+// the download button are the only callers of the other three.
 
 import { getToken } from "../auth/token";
 
@@ -64,18 +66,33 @@ export function resetTokenRejected(): void {
   tokenRejected = false;
 }
 
-export async function api<T>(
+interface RequestOptions {
+  method?: "GET" | "POST";
+  body?: BodyInit;
+  contentType?: string;
+  accept?: string;
+  signal?: AbortSignal;
+}
+
+/** One request with the token; a non-2xx answer becomes an ApiError with
+ * the daemon's message. Returns the raw Response for the caller to read. */
+async function request(
   path: string,
-  params?: Params,
-  options: { signal?: AbortSignal } = {},
-): Promise<T> {
-  const headers: Record<string, string> = { Accept: "application/json" };
+  params: Params | undefined,
+  options: RequestOptions,
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    Accept: options.accept ?? "application/json",
+  };
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (options.contentType) headers["Content-Type"] = options.contentType;
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path}${buildQuery(params)}`, {
+      method: options.method ?? "GET",
       headers,
+      body: options.body,
       signal: options.signal,
     });
   } catch (error) {
@@ -98,5 +115,71 @@ export async function api<T>(
     if (response.status === 401) rejectToken();
     throw new ApiError(response.status, message);
   }
+  return response;
+}
+
+/** GET, JSON back. */
+export async function api<T>(
+  path: string,
+  params?: Params,
+  options: { signal?: AbortSignal } = {},
+): Promise<T> {
+  const response = await request(path, params, { signal: options.signal });
   return (await response.json()) as T;
+}
+
+/** POST with an optional JSON body, JSON back (the writes of §11.7/§12). */
+export async function apiPost<T>(
+  path: string,
+  params?: Params,
+  body?: unknown,
+): Promise<T> {
+  const response = await request(path, params, {
+    method: "POST",
+    body: body === undefined ? undefined : JSON.stringify(body),
+    contentType: body === undefined ? undefined : "application/json",
+  });
+  return (await response.json()) as T;
+}
+
+/** POST with the bytes of a file as the body (`/files/upload`). */
+export async function apiUpload<T>(
+  path: string,
+  params: Params,
+  data: Blob,
+): Promise<T> {
+  const response = await request(path, params, {
+    method: "POST",
+    body: data,
+    contentType: data.type || "application/octet-stream",
+  });
+  return (await response.json()) as T;
+}
+
+/** The file name a `Content-Disposition` header carries, if any. */
+export function dispositionName(header: string | null): string | null {
+  if (!header) return null;
+  const extended = /filename\*=UTF-8''([^;]+)/i.exec(header)?.[1];
+  if (extended) {
+    try {
+      return decodeURIComponent(extended);
+    } catch {
+      // fall through to the plain name
+    }
+  }
+  return /filename="?([^";]+)"?/i.exec(header)?.[1] ?? null;
+}
+
+/** GET answered as bytes (`/file/content`): the blob and the name the
+ * daemon gave it, for the browser to save. The token stays in the header —
+ * never in a URL the browser could bookmark (DESIGN/v0-5-0.md §12.2). */
+export async function apiBlob(
+  path: string,
+  params?: Params,
+): Promise<{ blob: Blob; filename: string | null }> {
+  const response = await request(path, params, { accept: "*/*" });
+  return {
+    blob: await response.blob(),
+    filename: dispositionName(response.headers.get("Content-Disposition")),
+  };
 }

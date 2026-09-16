@@ -388,3 +388,46 @@ pre.json {
 .file-block h2 {
   margin-top: 0.75rem;
 }
+
+/* ------------------------------------------- writes (DESIGN §12.3) */
+
+.tag-editor .chips {
+  margin-right: 0.5rem;
+}
+.tag-editor .chip a {
+  color: inherit;
+  text-decoration: none;
+}
+.chip-remove {
+  border: none;
+  background: none;
+  padding: 0 0 0 0.25rem;
+  color: inherit;
+  line-height: 1;
+}
+.tag-add {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  margin-top: 0.35rem;
+}
+.tag-add input[type="text"] {
+  min-width: 9rem;
+}
+.upload {
+  margin-bottom: 0.75rem;
+}
+.upload summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.upload-outcomes {
+  margin: 0.25rem 0 0;
+  padding-left: 1.2rem;
+}
+.upload-outcomes li.err {
+  color: var(--err, #b42318);
+}
+.err {
+  color: var(--err, #b42318);
+}

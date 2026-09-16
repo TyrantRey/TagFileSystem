@@ -26,6 +26,11 @@ from tag_file_system.core.interface.file_metadata import TaggedFile
 from tag_file_system.root import OutsideRoot, Root
 
 
+class Cancelled(Exception):
+    """The run was cancelled or timed out (DESIGN/v0-5-0.md §11.3): raised by
+    the next ``ctx`` call with a side effect, and by ``ctx.check()``."""
+
+
 @dataclass
 class RunHandle:
     """Mutable state of one in-flight run, owned by the runner."""
@@ -40,6 +45,13 @@ class RunHandle:
     warned: bool = False  # the "running too long" P2 was raised
     lock: threading.Lock = field(default_factory=threading.Lock)
     sink: Callable[[str], None] = lambda line: None  # captured output → trace
+    # The thread the handler is called on (a worker, or the watch loop), so
+    # a cancel or a timeout can abandon it (DESIGN/v0-5-0.md §11.3).
+    thread: threading.Thread | None = None
+    cancelled: bool = False  # set by cancel/timeout: the next ctx call raises
+    # (size, mtime_ns) of the input file before the handler ran: a run that
+    # changed its own input is recorded as its producer (§11.3, race 2).
+    input_stat: tuple[int, int] | None = None
 
     @property
     def id(self) -> str:
@@ -48,6 +60,13 @@ class RunHandle:
     @property
     def elapsed(self) -> float:
         return time.monotonic() - self.started
+
+    def check(self) -> None:
+        if self.cancelled:
+            raise Cancelled(
+                f"run {self.id} of {self.run.action_name} was cancelled: "
+                f"{self.run.error or 'by the operator'}"
+            )
 
 
 class Runtime(Protocol):
@@ -178,6 +197,20 @@ class ActionContext:
     def run(self) -> RunRecord:
         return self._handle.run
 
+    # ---------------------------------------------------------- cancelling
+
+    @property
+    def cancelled(self) -> bool:
+        """Whether ``tfs cancel`` or a timeout ended this run
+        (DESIGN/v0-5-0.md §11.3): the record is final, what the handler does
+        from here is discarded."""
+        return self._handle.cancelled
+
+    def check(self) -> None:
+        """Raise ``Cancelled`` if the run was cancelled — for a long loop that
+        makes no ``ctx`` call of its own."""
+        self._handle.check()
+
     def _abs(self, path: Path | PurePosixPath | str) -> Path:
         p = Path(path)
         if p.is_absolute():
@@ -193,6 +226,7 @@ class ActionContext:
     # ------------------------------------------------------------ file ops
 
     def copy(self, src: Path | str, dst: Path | str) -> Path:
+        self.check()
         source, target = self._abs(src), self._abs(dst)
         if target.is_dir():
             target = target / source.name
@@ -210,6 +244,7 @@ class ActionContext:
         return target
 
     def move(self, src: Path | str, dst: Path | str) -> Path:
+        self.check()
         source, target = self._abs(src), self._abs(dst)
         if target.is_dir():
             target = target / source.name
@@ -229,6 +264,7 @@ class ActionContext:
     def write(
         self, dst: Path | str, data: bytes | str, encoding: str = "utf-8"
     ) -> Path:
+        self.check()
         target = self._abs(dst)
         target.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(data, str):
@@ -244,6 +280,7 @@ class ActionContext:
         return target
 
     def delete(self, path: Path | str) -> None:
+        self.check()
         target = self._abs(path)
         target.unlink()
         self._runtime.trace(
@@ -255,6 +292,7 @@ class ActionContext:
 
     def emit(self, path: Path | str) -> None:
         """Declare that ``path`` exists because of this run."""
+        self.check()
         self._runtime.emit(self._handle, self._abs(path))
 
     # --------------------------------------------------------------- trace
@@ -270,6 +308,7 @@ class ActionContext:
 
     def spawn(self, fn: Callable, *args: Any, **kwargs: Any) -> threading.Thread:
         """Run ``fn`` in a tracked thread; the run then ends on ``done()``."""
+        self.check()
         return self._runtime.spawn(self._handle, fn, args, kwargs)
 
     def done(self, result: Any = None) -> None:
@@ -300,14 +339,17 @@ class ActionContext:
         return self._runtime.query(**criteria)
 
     def tag(self, path: Path | str, *names: str) -> None:
+        self.check()
         self._runtime.tag(self._handle, self._abs(path), list(names), add=True)
 
     def untag(self, path: Path | str, *names: str) -> None:
         """Remove tags added through ``tag``/the API. Tags spelled in the
         file's *name* come back on the next re-index: the name is authoritative."""
+        self.check()
         self._runtime.tag(self._handle, self._abs(path), list(names), add=False)
 
     def retry(self, run_id: str) -> RunRecord | None:
+        self.check()
         return self._runtime.retry(run_id)
 
     def resolve(self, kind: str, raw: str) -> Path:

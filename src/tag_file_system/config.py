@@ -62,6 +62,15 @@ class DaemonConfig(BaseModel):
     run_warn_after_seconds: float = Field(
         default=300, gt=0, strict=True, allow_inf_nan=False
     )
+    # Work control (DESIGN/v0-5-0.md §11.8). 0 is "off" for every one of them:
+    # no workers (runs on the watch loop), no rate limit, no timeout, no
+    # confirmation threshold.
+    max_concurrent_runs: int = Field(default=1, ge=0, le=64, strict=True)
+    max_runs_per_minute: int = Field(default=0, ge=0, strict=True)
+    run_timeout_seconds: float = Field(
+        default=0, ge=0, strict=True, allow_inf_nan=False
+    )
+    confirm_above: int = Field(default=500, ge=0, strict=True)
 
     @field_validator("bind")
     @classmethod
@@ -150,6 +159,10 @@ class Config(BaseModel):
             f"port = {self.daemon.port}",
             f"stop_timeout_seconds = {_toml_num(self.daemon.stop_timeout_seconds)}",
             f"run_warn_after_seconds = {_toml_num(self.daemon.run_warn_after_seconds)}   # running longer raises P2",
+            f"max_concurrent_runs = {self.daemon.max_concurrent_runs}      # worker threads; 0 = run on the watch loop",
+            f"max_runs_per_minute = {self.daemon.max_runs_per_minute}      # 0 = unlimited",
+            f"run_timeout_seconds = {_toml_num(self.daemon.run_timeout_seconds)}      # 0 = none; a file run longer than this is failed",
+            f"confirm_above = {self.daemon.confirm_above}          # `tfs reload`/`rerun` refuse more runs than this without --yes; 0 = off",
             "",
             '[remotes]   # named destinations outside the root, e.g. photos = "/home/photo"',
         ]

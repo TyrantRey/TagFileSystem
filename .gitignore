@@ -34,3 +34,6 @@ Frontend/node_modules/
 Frontend/node_modules/
 Frontend/dist/
 Frontend/coverage/
+ci-docker-root/
+# The default root of docker-compose.yml
+/data/

@@ -13,6 +13,7 @@ import {
   TagChips,
   When,
 } from "../components/bits";
+import { UploadBox } from "../components/UploadBox";
 import { bytes } from "../lib/fmt";
 
 const LIMIT = 50;
@@ -148,6 +149,14 @@ export function FilesPage() {
               include deleted
             </label>
           </form>
+          <UploadBox
+            key={prefix}
+            prefix={prefix}
+            onUploaded={() => {
+              files.reload();
+              tagList.reload();
+            }}
+          />
           {files.error && <ErrorBox error={files.error} />}
           {!files.data && !files.error && <Loading />}
           {files.data && files.data.items.length === 0 && (

@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Callable, Literal, TypeVar
 
+from tag_file_system.addons.context import Cancelled  # noqa: F401 - re-exported
 from tag_file_system.core.interface.action import Hook, Severity
 from tag_file_system.core.interface.tag import Tag
 

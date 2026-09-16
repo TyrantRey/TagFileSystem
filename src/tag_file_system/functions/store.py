@@ -96,11 +96,15 @@ class FunctionsStore:
         root: Root,
         loader: AddonLoader,
         report: ProblemReporter | None = None,
+        quiet: bool = False,
     ) -> None:
         self.root = root
         self.loader = loader
         self.report: ProblemReporter = report if report is not None else _silent
         self.logger = logger
+        # A store read for a `tfs plan` and thrown away logs nothing
+        # (DESIGN/v0-5-0.md §11.2).
+        self.quiet = quiet
         self.files: dict[str, FunctionsFile] = {}  # folder -> last-good parse
         self.problems: list[dict[str, Any]] = []  # what `tfs list` shows
         self.invalid: dict[str, list[tuple[str, str, str]]] = {}
@@ -151,10 +155,11 @@ class FunctionsStore:
             return self.files.get(folder)
         self._file_errors.pop(folder, None)
         self.files[folder] = parsed
-        self.logger.info(
-            f"Loaded {file_label(folder)}: {len(parsed.entries)} entr(y/ies)"
-            + (f", {len(parsed.invalid)} invalid" if parsed.invalid else "")
-        )
+        if not self.quiet:
+            self.logger.info(
+                f"Loaded {file_label(folder)}: {len(parsed.entries)} entr(y/ies)"
+                + (f", {len(parsed.invalid)} invalid" if parsed.invalid else "")
+            )
         return parsed
 
     def is_current(self, folder: str, path: Path) -> bool:

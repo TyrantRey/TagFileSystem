@@ -21,6 +21,26 @@ export interface Status {
   api: string;
   functions: { files: number; problems: number };
   ui: { built: boolean; dist: string | null };
+  /** DESIGN/v0-5-0.md §11.5: the queue and the limits (0.5.0 daemons). */
+  paused?: boolean;
+  queue?: {
+    depth: number;
+    active: number;
+    workers: number;
+    since: number | null;
+  };
+  uptime_seconds?: number;
+  limits?: {
+    max_concurrent_runs: number;
+    max_runs_per_minute: number;
+    run_timeout_seconds: number;
+    confirm_above: number;
+  };
+  files?: number;
+  runs?: { in_flight: number; failed: number; interrupted: number };
+  problems?: { undelivered: number };
+  drift?: string[];
+  database?: { schema: number; path: string };
 }
 
 export interface FileItem {
@@ -37,6 +57,27 @@ export interface FileItem {
 export interface FileDetail extends FileItem {
   format: string | null;
   mtime_ns: number | null;
+  /** The tags the path spells: not removable here (DESIGN/v0-5-0.md §12). */
+  name_tags?: string[];
+}
+
+/** `POST /api/v1/file/tags` (DESIGN/v0-5-0.md §12.1). */
+export interface TagsResult {
+  path: string;
+  file: FileItem;
+  added: string[];
+  removed: string[];
+  kept: string[];
+  applies: string[];
+}
+
+/** `POST /api/v1/files/upload`. */
+export interface UploadResult {
+  path: string;
+  created: boolean;
+  size: number;
+  file: FileItem | null;
+  applies: string[];
 }
 
 export interface TagItem {

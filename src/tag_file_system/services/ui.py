@@ -13,6 +13,8 @@ without a build answers 503 so "not built" and "no such file" are told apart.
 """
 
 import mimetypes
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote
@@ -21,6 +23,9 @@ from tag_file_system.core.paths import is_anchored
 from tag_file_system.version import REPO
 
 UI_PREFIX = "/ui"
+# An install that is not a checkout (the Docker image, DESIGN/v0-5-0.md §10.2)
+# says where the built UI lives; an explicit choice beats discovery.
+UI_DIR_ENV = "TFS_UI_DIR"
 NOT_BUILT = "UI not built: run `npm ci && npm run build` in Frontend/"
 IMMUTABLE = "public, max-age=31536000, immutable"  # Vite's hashed assets/
 NO_CACHE = "no-cache"  # index.html and root-level files
@@ -47,8 +52,13 @@ _TYPES = {
 }
 
 
-def default_ui_dir() -> Path | None:
-    """``<checkout>/Frontend/dist``, or ``None`` outside a checkout."""
+def default_ui_dir(environ: Mapping[str, str] = os.environ) -> Path | None:
+    """``$TFS_UI_DIR`` when set, else ``<checkout>/Frontend/dist``, else
+    ``None`` (an install that is neither a checkout nor told where the UI
+    is)."""
+    named = environ.get(UI_DIR_ENV, "").strip()
+    if named:
+        return Path(named)
     return REPO / "Frontend" / "dist" if REPO is not None else None
 
 

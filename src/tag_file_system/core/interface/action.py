@@ -52,6 +52,9 @@ class RunSource(StrEnum):
     RETRY = "retry"
     CHAIN = "chain"
     LIFECYCLE = "lifecycle"  # the daemon started or stopped
+    RERUN = "rerun"  # `tfs rerun` (DESIGN/v0-5-0.md §11.3)
+    CLI = "cli"  # a file command: `tfs touch/cp/mv/rm` (§11.6)
+    API = "api"  # an upload or a tag edit from the browser / the API (§12)
 
 
 class Severity(StrEnum):
@@ -88,6 +91,8 @@ class TraceKind(StrEnum):
     EMIT = "emit"
     RECORD = "record"
     OBSERVED = "observed"
+    # The run changed the file it was called on (DESIGN/v0-5-0.md §11.3).
+    SELF_MODIFIED = "self_modified"
 
 
 class ProvenanceKind(StrEnum):

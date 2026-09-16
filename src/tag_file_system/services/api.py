@@ -10,9 +10,11 @@ before dispatching), GET only, errors are ``{"error": ...}`` — ``BadRequest``
 SQL. Additive changes stay ``v1``; a rename or removal is ``/api/v2``.
 """
 
+import json
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePath, PurePosixPath
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Protocol
 
 from tag_file_system.core.interface.action import (
     FileHistory,
@@ -25,6 +27,8 @@ from tag_file_system.core.interface.file_metadata import TaggedFile
 from tag_file_system.core.paths import has_parent_reference, is_anchored, posix_key
 from tag_file_system.functions import functions_payload
 from tag_file_system.root import FUNCTIONS_FILE, same_name
+from tag_file_system.services.plan import PLAN_LIMIT, PLAN_MAX
+from tag_file_system.services.tagging import TaggingParser
 from tag_file_system.version import COMMIT, VERSION
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -46,6 +50,35 @@ class BadRequest(ValueError):
 
 class NotFound(LookupError):
     """The resource a request names does not exist (HTTP 404)."""
+
+
+class Conflict(RuntimeError):
+    """The request is well-formed but the state refuses it (HTTP 409): a run
+    that is not in flight, a file that exists, a retry the runner declines."""
+
+
+@dataclass(frozen=True)
+class FileResponse:
+    """A handler's answer that is a file's bytes, not JSON (DESIGN/v0-5-0.md
+    §12.1): the control server streams it with these headers."""
+
+    path: Path
+    content_type: str
+    filename: str
+    size: int
+
+
+class ByteReader(Protocol):
+    """What an upload reads from: the request's ``rfile``, or a ``BytesIO``."""
+
+    def read(self, size: int = ..., /) -> bytes: ...
+
+
+# A handler that reads the request body itself (an upload): (query, body
+# stream, Content-Length) -> payload.
+RawHandler = Callable[[Query, ByteReader, int], Any]
+
+_PARSER = TaggingParser()
 
 
 # ---------------------------------------------------------------- parsing
@@ -106,6 +139,47 @@ def parse_file_key(query: Query, name: str = "path") -> str:
     if same_name(PurePosixPath(key).name, FUNCTIONS_FILE):
         raise BadRequest(f"{key} is a configuration file, not a data file")
     return key
+
+
+def parse_data_key(query: Query, name: str = "path") -> str:
+    """A root-relative key that may name a directory (``mkdir``, ``rm -r``,
+    a copy's destination): ``parse_file_key`` without the "not the root"
+    rule for directories — the root itself is still refused."""
+    text = (param(query, name) or "").strip()
+    if not text:
+        raise BadRequest(f"{name} is required")
+    if is_anchored(text) or has_parent_reference(text):
+        raise BadRequest(f"{text!r} is not a root-relative path")
+    try:
+        key = posix_key(text)
+    except ValueError as e:
+        raise BadRequest(str(e)) from e
+    if key == ".":
+        raise BadRequest(f"{name} must name a path below the root")
+    if same_name(PurePosixPath(key).name, FUNCTIONS_FILE):
+        raise BadRequest(f"{key} is a configuration file, not a data file")
+    return key
+
+
+def list_param(query: Query, name: str) -> list[str]:
+    """``?add=a&add=b``, or a JSON list the body put in the query as text
+    (``_read_body``): the names, in order, blanks dropped."""
+    out: list[str] = []
+    for value in query.get(name) or []:
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                items = json.loads(text)
+            except ValueError:
+                raise BadRequest(f"{name} must be names or a JSON list") from None
+            if not isinstance(items, list) or not all(
+                isinstance(i, str) for i in items
+            ):
+                raise BadRequest(f"{name} must be a JSON list of strings")
+            out.extend(i.strip() for i in items if i.strip())
+        elif text:
+            out.append(text)
+    return out
 
 
 def parse_id(query: Query) -> str:
@@ -211,6 +285,9 @@ def file_detail(file: TaggedFile) -> dict[str, Any]:
         **file_payload(file),
         "format": file.metadata.file_format if file.metadata else None,
         "mtime_ns": file.metadata.mtime_ns if file.metadata else None,
+        # The tags the path itself spells: a client cannot remove those
+        # (DESIGN/v0-5-0.md §12.2).
+        "name_tags": _PARSER.parse_path(file.path).tag_names,
     }
 
 
@@ -262,7 +339,29 @@ class Api:
             ("GET", f"{API_PREFIX}/addons"): self.addons,
             ("GET", f"{API_PREFIX}/functions"): self.functions,
             ("GET", f"{API_PREFIX}/upgrades"): self.upgrades,
+            # DESIGN/v0-5-0.md §11.7: the operator's controls and the file
+            # commands. POST where state changes; the UI never calls them.
+            ("GET", f"{API_PREFIX}/plan"): self.plan,
+            ("GET", f"{API_PREFIX}/queue"): self.queue,
+            ("GET", f"{API_PREFIX}/doctor"): self.doctor,
+            ("POST", f"{API_PREFIX}/pause"): self.pause,
+            ("POST", f"{API_PREFIX}/resume"): self.resume,
+            ("POST", f"{API_PREFIX}/run/retry"): self.run_retry,
+            ("POST", f"{API_PREFIX}/run/cancel"): self.run_cancel,
+            ("POST", f"{API_PREFIX}/rerun"): self.rerun,
+            ("POST", f"{API_PREFIX}/files/touch"): self.files_touch,
+            ("POST", f"{API_PREFIX}/files/copy"): self.files_copy,
+            ("POST", f"{API_PREFIX}/files/move"): self.files_move,
+            ("POST", f"{API_PREFIX}/files/remove"): self.files_remove,
+            ("POST", f"{API_PREFIX}/files/mkdir"): self.files_mkdir,
+            # DESIGN/v0-5-0.md §12: the browser's writes.
+            ("GET", f"{API_PREFIX}/file/content"): self.file_content,
+            ("POST", f"{API_PREFIX}/file/tags"): self.file_tags,
         }
+
+    def raw_routes(self) -> dict[tuple[str, str], RawHandler]:
+        """Routes whose body is not JSON: the upload's is the file."""
+        return {("POST", f"{API_PREFIX}/files/upload"): self.files_upload}
 
     # -- helpers
 
@@ -283,7 +382,107 @@ class Api:
                 "problems": len(functions.problems),
             },
             "ui": self.ui.describe(),
+            **self.daemon.status_detail(),
         }
+
+    # -- operations (DESIGN/v0-5-0.md §11)
+
+    def _scope(self, query: Query) -> tuple[str | None, str | None]:
+        """``path`` (one file) or ``prefix`` (a directory), never both."""
+        key = parse_file_key(query) if param(query, "path") else None
+        prefix = validate_prefix(param(query, "prefix") or None)
+        if key is not None and prefix is not None:
+            raise BadRequest("give path or prefix, not both")
+        return key, prefix
+
+    def plan(self, query: Query) -> dict[str, Any]:
+        key, prefix = self._scope(query)
+        raw_limit = param(query, "limit")
+        limit = PLAN_LIMIT if raw_limit is None else parse_int("limit", raw_limit)
+        if limit < 1 or limit > PLAN_MAX:
+            raise BadRequest(f"limit must be between 1 and {PLAN_MAX}, got {limit}")
+        return self.daemon.plan(key=key, prefix=prefix, limit=limit)
+
+    def queue(self, query: Query) -> dict[str, Any]:
+        raw_limit = param(query, "limit")
+        limit = 20 if raw_limit is None else parse_int("limit", raw_limit)
+        if limit < 0 or limit > PAGE_MAX:
+            raise BadRequest(f"limit must be between 0 and {PAGE_MAX}, got {limit}")
+        return self.daemon.queue_view(limit)
+
+    def doctor(self, query: Query) -> dict[str, Any]:
+        return self.daemon.doctor()
+
+    def pause(self, query: Query) -> dict[str, Any]:
+        return self.daemon.pause()
+
+    def resume(self, query: Query) -> dict[str, Any]:
+        return self.daemon.resume()
+
+    def run_retry(self, query: Query) -> dict[str, Any]:
+        return self.daemon.retry_run(parse_id(query))
+
+    def run_cancel(self, query: Query) -> dict[str, Any]:
+        return self.daemon.cancel_run(parse_id(query))
+
+    def rerun(self, query: Query) -> dict[str, Any]:
+        handler = (param(query, "handler") or "").strip()
+        if not handler:
+            raise BadRequest("handler is required (script.handler)")
+        key, prefix = self._scope(query)
+        return self.daemon.rerun(
+            handler,
+            key=key,
+            prefix=prefix,
+            failed=parse_flag("failed", param(query, "failed")),
+            stale=parse_flag("stale", param(query, "stale")),
+            dry=parse_flag("dry", param(query, "dry")),
+            yes=parse_flag("yes", param(query, "yes")),
+        )
+
+    def files_touch(self, query: Query) -> dict[str, Any]:
+        return self.daemon.touch(parse_file_key(query), param(query, "content"))
+
+    def files_copy(self, query: Query) -> dict[str, Any]:
+        return self.daemon.copy(
+            parse_file_key(query, "src"), parse_data_key(query, "dst")
+        )
+
+    def files_move(self, query: Query) -> dict[str, Any]:
+        return self.daemon.move(
+            parse_file_key(query, "src"), parse_data_key(query, "dst")
+        )
+
+    def files_remove(self, query: Query) -> dict[str, Any]:
+        return self.daemon.remove(
+            parse_data_key(query, "path"),
+            recursive=parse_flag("recursive", param(query, "recursive")),
+        )
+
+    def files_mkdir(self, query: Query) -> dict[str, Any]:
+        return self.daemon.mkdir(parse_data_key(query, "path"))
+
+    # -- the browser's writes (DESIGN/v0-5-0.md §12)
+
+    def files_upload(
+        self, query: Query, body: ByteReader, length: int
+    ) -> dict[str, Any]:
+        return self.daemon.upload(
+            parse_file_key(query),
+            body,
+            length,
+            overwrite=parse_flag("overwrite", param(query, "overwrite")),
+        )
+
+    def file_content(self, query: Query) -> FileResponse:
+        return self.daemon.content(parse_file_key(query))
+
+    def file_tags(self, query: Query) -> dict[str, Any]:
+        return self.daemon.retag(
+            parse_file_key(query),
+            list_param(query, "add"),
+            list_param(query, "remove"),
+        )
 
     def files(self, query: Query) -> dict[str, Any]:
         filters = parse_file_filters(query)

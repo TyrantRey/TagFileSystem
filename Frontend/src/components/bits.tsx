@@ -62,6 +62,8 @@ const TONES: Record<string, string> = {
   skipped: "muted",
   queued: "muted",
   running: "info",
+  paused: "warn",
+  stopping: "warn",
   crit: "crit",
   err: "err",
   warn: "warn",
