@@ -167,7 +167,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
+      # Pulling the base images needs Docker Hub, which now and then resets
+      # the connection mid-handshake ("failed to fetch oauth token"). One
+      # such hiccup must not fail the job: a second attempt after a pause.
       - name: Build the image
+        id: build
+        continue-on-error: true
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: tagfilesystem:ci
+          build-args: GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Wait before the second attempt
+        if: steps.build.outcome == 'failure'
+        run: sleep 30
+      - name: Build the image (second attempt)
+        if: steps.build.outcome == 'failure'
         uses: docker/build-push-action@v6
         with:
           context: .
