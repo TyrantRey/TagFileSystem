@@ -46,8 +46,8 @@ from tag_file_system.core.logger import logger
 from tag_file_system.database.action_store import ActionStore
 from tag_file_system.root import SCRIPT_DIR, Root
 
-# Same rule as ActionCall.name (core/interface/tag.py): a slug that a marker
-# could never spell must not bind a script.
+# The script key of a .tfsfunctions.yaml entry (DESIGN/v0-4-0.md §3.1): lower
+# case, because SMB/NTFS are case-insensitive and Linux is not.
 ADDON_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 PACKAGE = "tfs_addons"
 MODULE_PREFIX = PACKAGE + "."
@@ -68,19 +68,21 @@ class ProblemReporter(Protocol):
 
 @dataclass(frozen=True)
 class FileHandler:
+    """One mark of one file-handler function. ``name`` is the function's
+    ``__name__`` — how a ``.tfsfunctions.yaml`` entry addresses it
+    (DESIGN/v0-4-0.md §5); a function with several marks appears once per mark
+    under the same name."""
+
     addon: "Addon"
     func: Callable
     spec: HandlerSpec
     schema: dict[str, Any]
+    name: str
 
     @property
     def hook(self) -> Hook:
         assert self.spec.hook is not None
         return self.spec.hook
-
-    @property
-    def name(self) -> str:
-        return callable_name(self.func)
 
 
 @dataclass(frozen=True)
@@ -88,10 +90,7 @@ class ProblemHandler:
     addon: "Addon"
     func: Callable
     severity: Severity
-
-    @property
-    def name(self) -> str:
-        return callable_name(self.func)
+    name: str
 
 
 @dataclass(frozen=True)
@@ -102,10 +101,7 @@ class LifecycleHandler:
     addon: "Addon"
     func: Callable
     hook: Hook
-
-    @property
-    def name(self) -> str:
-        return callable_name(self.func)
+    name: str
 
 
 NO_ARGUMENTS: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
@@ -132,32 +128,63 @@ class Addon:
             seen.setdefault(lifecycle.hook)
         return list(seen)
 
+    @property
+    def hooks_by_handler(self) -> dict[str, list[Hook]]:
+        """``{handler name: its hooks}`` — what ``actions.hooks_json`` stores."""
+        marks: dict[str, list[Hook]] = {}
+        for handler in self.file_handlers:
+            marks.setdefault(handler.name, []).append(handler.hook)
+        for lifecycle in self.lifecycle_handlers:
+            marks.setdefault(lifecycle.name, []).append(lifecycle.hook)
+        return marks
+
     def handlers(self, hook: Hook) -> list[FileHandler]:
         return [h for h in self.file_handlers if h.hook is hook]
+
+    def named(self, name: str) -> list[FileHandler]:
+        """Every mark of the file-handler function called ``name``, in source
+        order (DESIGN/v0-4-0.md §5: handlers are addressed by name)."""
+        return [h for h in self.file_handlers if h.name == name]
+
+    def hooks_of(self, name: str) -> list[str]:
+        return [h.spec.describe() for h in self.named(name)]
 
     def lifecycle(self, hook: Hook) -> list[LifecycleHandler]:
         return [h for h in self.lifecycle_handlers if h.hook is hook]
 
     @property
     def signature(self) -> dict[str, Any]:
-        """Per-hook JSON Schema of the action arguments (``actions.signature_json``)."""
-        return {
-            **{h.spec.describe(): h.schema for h in self.file_handlers},
-            **{h.hook.value: NO_ARGUMENTS for h in self.lifecycle_handlers},
-        }
+        """JSON Schema of each handler's parameters, by handler name
+        (``actions.signature_json``)."""
+        schemas: dict[str, Any] = {}
+        for handler in self.file_handlers:
+            schemas.setdefault(handler.name, handler.schema)
+        for lifecycle in self.lifecycle_handlers:
+            schemas.setdefault(lifecycle.name, NO_ARGUMENTS)
+        return schemas
 
     def describe(self) -> dict[str, Any]:
-        """What ``tfs list`` and ``/actions`` report about this add-on."""
+        """What ``tfs list`` and ``/actions`` report about this add-on: one
+        entry per handler, with every hook it is marked with."""
+        handlers: dict[str, dict[str, Any]] = {}
+        for handler in self.file_handlers:
+            entry = handlers.setdefault(
+                handler.name,
+                {"name": handler.name, "hooks": [], "signature": handler.schema},
+            )
+            entry["hooks"].append(handler.spec.describe())
+        for lifecycle in self.lifecycle_handlers:
+            entry = handlers.setdefault(
+                lifecycle.name,
+                {"name": lifecycle.name, "hooks": [], "signature": NO_ARGUMENTS},
+            )
+            entry["hooks"].append(lifecycle.hook.value)
         return {
             "name": self.name,
             "script": self.key.as_posix(),
             "script_hash": self.script_hash,
-            "hooks": [
-                *(h.spec.describe() for h in self.file_handlers),
-                *(h.hook.value for h in self.lifecycle_handlers),
-            ],
+            "handlers": list(handlers.values()),
             "problem_hooks": [h.severity.value for h in self.problem_handlers],
-            "signature": self.signature,
         }
 
 
@@ -432,7 +459,7 @@ class AddonLoader:
                     script_path=addon.key,
                     script_hash=addon.script_hash,
                     signature=addon.signature,
-                    hooks=addon.hooks,
+                    hooks=addon.hooks_by_handler,
                 )
             except Exception as e:
                 self.report(
@@ -541,9 +568,14 @@ class AddonLoader:
 
     def _collect(self, addon: Addon) -> int:
         """Register the marked functions of the module. Returns how many
-        handlers were skipped for a bad signature."""
-        seen_slots: dict[tuple[Hook, str | None], tuple[str, str]] = {}
+        handlers were skipped for a bad signature.
+
+        Handlers are addressed by name (DESIGN/v0-4-0.md §5), so several
+        functions may carry the same hook; what two functions may *not* share
+        is a name, since no configuration entry could tell them apart.
+        """
         seen_marks: set[tuple[int, HandlerSpec]] = set()
+        claimed: dict[str, tuple[int, str]] = {}  # handler name -> (id(func), attr)
         skipped = 0
         for attr, member in sorted(vars(addon.module).items(), key=_source_order):
             marks = handlers_of(member)
@@ -552,6 +584,8 @@ class AddonLoader:
             owner = getattr(member, "__module__", None) or ""
             if owner.startswith(MODULE_PREFIX) and owner != addon.module.__name__:
                 continue  # a sibling add-on's handler, merely imported here
+            # A nameless callable (a partial) is addressed by its attribute.
+            name = getattr(member, "__name__", None) or attr
             for spec in marks:
                 if (id(member), spec) in seen_marks:
                     continue  # the same function under another name
@@ -568,7 +602,10 @@ class AddonLoader:
                         assert spec.severity is not None
                         addon.problem_handlers.append(
                             ProblemHandler(
-                                addon=addon, func=member, severity=spec.severity
+                                addon=addon,
+                                func=member,
+                                severity=spec.severity,
+                                name=name,
                             )
                         )
                     elif spec.kind == "lifecycle":
@@ -580,43 +617,35 @@ class AddonLoader:
                                 f"{callable_name(member)}: {spec.hook.value} handlers take (ctx); "
                                 f"{', '.join(required)} would never be supplied"
                             )
-                        slot = (spec.hook, None)
-                        if slot in seen_slots:
-                            winner, describe = seen_slots[slot]
-                            self.report(
-                                Severity.ERR,
-                                "addon.duplicate_handler",
-                                f"{addon.path.name}: handler {callable_name(member)} "
-                                f"({spec.describe()}) skipped: {winner} already handles {describe}",
-                                action_name=addon.name,
-                            )
-                            skipped += 1
-                            continue
-                        seen_slots[slot] = (callable_name(member), spec.describe())
                         addon.lifecycle_handlers.append(
-                            LifecycleHandler(addon=addon, func=member, hook=spec.hook)
+                            LifecycleHandler(
+                                addon=addon, func=member, hook=spec.hook, name=name
+                            )
                         )
                     else:
                         assert spec.hook is not None
                         schema = signature_schema(member)  # SignatureError first
-                        slot = (spec.hook, spec.tag)
-                        if slot in seen_slots:
-                            # Runs are keyed per (file, add-on, hook, args): a
-                            # second handler on the same hook could never run.
-                            winner, describe = seen_slots[slot]
-                            self.report(
-                                Severity.ERR,
-                                "addon.duplicate_handler",
-                                f"{addon.path.name}: handler {callable_name(member)} "
-                                f"({spec.describe()}) skipped: {winner} already handles {describe}",
-                                action_name=addon.name,
+                        if spec.hook is Hook.TAGGED and "tag" in schema.get(
+                            "properties", {}
+                        ):
+                            raise SignatureError(
+                                f"{name}: parameter 'tag' is reserved for tagged "
+                                "handlers (the run key carries the tag under that name)"
                             )
-                            skipped += 1
-                            continue
-                        seen_slots[slot] = (callable_name(member), spec.describe())
+                        other = claimed.get(name)
+                        if other is not None and other[0] != id(member):
+                            raise SignatureError(
+                                f"name {name} is already used by {other[1]}; "
+                                "functions are addressed by __name__"
+                            )
+                        claimed[name] = (id(member), attr)
                         addon.file_handlers.append(
                             FileHandler(
-                                addon=addon, func=member, spec=spec, schema=schema
+                                addon=addon,
+                                func=member,
+                                spec=spec,
+                                schema=schema,
+                                name=name,
                             )
                         )
                 except Exception as e:
@@ -637,6 +666,20 @@ class AddonLoader:
     def handlers_for(self, name: str, hook: Hook) -> list[FileHandler]:
         addon = self.addons.get(name)
         return addon.handlers(hook) if addon is not None else []
+
+    def handler_for(self, script: str, name: str) -> FileHandler | None:
+        """The file handler ``name`` of ``script`` — its first mark; the
+        function and schema are the same on every mark — or ``None``."""
+        addon = self.addons.get(script)
+        marks = addon.named(name) if addon is not None else []
+        return marks[0] if marks else None
+
+    def handler_marks(self, script: str, name: str, hook: Hook) -> list[FileHandler]:
+        """The marks of ``script.name`` that fire on ``hook``."""
+        addon = self.addons.get(script)
+        if addon is None:
+            return []
+        return [h for h in addon.named(name) if h.hook is hook]
 
     def tag_handlers(self, tag: str) -> list[FileHandler]:
         wanted = normalize_tag(tag)

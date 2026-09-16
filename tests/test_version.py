@@ -1,5 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
+import importlib
 import re
 import subprocess
 from pathlib import Path
@@ -67,3 +68,38 @@ def test_identity_formats_short_hashes():
     assert version.identity("0.2.0", "abcdef0123456789") == "0.2.0 (abcdef0)"
     assert version.identity("0.2.0", None) == "0.2.0 (unknown)"
     assert version.describe() == version.identity(version.VERSION, version.COMMIT)
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("a" * 40, "a" * 40),
+        ("ABCDEF" + "0" * 34, "abcdef" + "0" * 34),  # as git prints it
+        (" " + "b" * 40 + "\n", "b" * 40),
+        ("abc1234", None),  # a short hash is not an identity
+        ("v0.5.0", None),
+        ("", None),
+    ],
+)
+def test_commit_from_env_takes_only_a_full_hash(value: str, expected: str | None):
+    """The Docker image stamps TFS_COMMIT (DESIGN/v0-5-0.md §10.2); anything
+    but a full hash is "unknown", never a guess."""
+    assert version.commit_from_env({version.COMMIT_ENV: value}) == expected
+
+
+def test_commit_from_env_without_the_variable_is_none():
+    assert version.commit_from_env({}) is None
+
+
+def test_a_checkout_head_beats_the_stamp(monkeypatch: pytest.MonkeyPatch):
+    """The image sets TFS_COMMIT because it has no checkout; a checkout
+    reports its HEAD whatever the environment says."""
+    monkeypatch.setenv(version.COMMIT_ENV, "f" * 40)
+    reloaded = importlib.reload(version)
+    try:
+        assert reloaded.REPO is not None
+        assert reloaded.COMMIT == version.git_head(reloaded.REPO)
+        assert reloaded.COMMIT != "f" * 40
+    finally:
+        monkeypatch.delenv(version.COMMIT_ENV)
+        importlib.reload(version)

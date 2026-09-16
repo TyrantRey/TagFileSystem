@@ -10,6 +10,8 @@ from tag_file_system.addons.binding import (
     BindingError,
     SignatureError,
     bind,
+    by_position,
+    check,
     parameters_of,
     signature_schema,
 )
@@ -115,7 +117,7 @@ def resolver(kind: str, raw: str) -> Path:
     return Path(f"/resolved/{kind}/{raw}")
 
 
-def test_bind_coerces_and_keeps_raw_strings():
+def test_bind_coerces_by_name_and_takes_typed_values_as_they_are():
     def run(
         path,
         metadata,
@@ -126,69 +128,118 @@ def test_bind_coerces_and_keeps_raw_strings():
         flag: bool = False,
     ): ...
 
-    bound = bind(run, ("800", "1.5", "photos"), resolver)
-
-    assert bound.kwargs == {
+    expected = {
         "width": 800,
         "ratio": 1.5,
         "dst": Path("/resolved/remote/photos"),
         "flag": False,
     }
-    assert bound.raw == {"width": "800", "ratio": "1.5", "dst": "photos"}
+    # YAML gave the values their types; a quoted number still coerces (lax).
+    assert (
+        bind(run, {"width": 800, "ratio": 1.5, "dst": "photos"}, resolver).kwargs
+        == expected
+    )
+    assert (
+        bind(run, {"width": "800", "ratio": "1.5", "dst": "photos"}, resolver).kwargs
+        == expected
+    )
+    assert (
+        bind(run, {"dst": "photos", "ratio": 1.5, "width": 800}, resolver).kwargs
+        == expected
+    )
 
 
 def test_bind_defaults_and_untyped_params():
     def run(path, metadata, ctx, suffix, dst: action.TagDir = Path("out")): ...
 
-    bound = bind(run, (".jpg",), resolver)
+    bound = bind(run, {"suffix": ".jpg"}, resolver)
     assert bound.kwargs == {"suffix": ".jpg", "dst": Path("out")}
-    assert bound.raw == {"suffix": ".jpg"}
 
-    bound = bind(run, (".jpg", "photos"), resolver)
+    bound = bind(run, {"suffix": ".jpg", "dst": "photos"}, resolver)
     assert bound.kwargs["dst"] == Path("/resolved/tagdir/photos")
-    assert bind(lambda p, m, c: None, ()).kwargs == {}
+    assert bind(lambda p, m, c: None, {}).kwargs == {}
 
 
 def test_bind_literal_and_enum_like_types():
     def run(path, metadata, ctx, mode: Literal["fast", "slow"]): ...
 
-    assert bind(run, ("fast",)).kwargs == {"mode": "fast"}
+    assert bind(run, {"mode": "fast"}).kwargs == {"mode": "fast"}
     with pytest.raises(BindingError) as exc:
-        bind(run, ("medium",))
+        bind(run, {"mode": "medium"})
     assert "mode" in str(exc.value)
 
 
 @pytest.mark.parametrize(
-    "raw_args, message",
+    "args, message",
     [
-        ((), "missing argument(s) width"),
-        (("1", "2", "3"), "takes 2 argument(s), the name gives 3"),
-        (("eight", "photos"), "width"),
-        (("8", "missing"), "unknown remote"),
+        ({}, "missing required parameter(s) width"),
+        ({"dst": "photos"}, "missing required parameter(s) width"),
+        ({"width": 1, "dst": "photos", "extra": 3}, "unknown parameter(s) extra"),
+        ({"width": "eight", "dst": "photos"}, "width"),
+        ({"width": 8, "dst": "missing"}, "unknown remote"),
+        ({"width": 8, "dst": 3}, "expected a remote name, got int"),
     ],
 )
-def test_bind_errors_are_binding_errors(raw_args, message):
+def test_bind_errors_are_binding_errors(args, message):
     def run(path, metadata, ctx, width: int, dst: action.Remote): ...
 
     with pytest.raises(BindingError) as exc:
-        bind(run, raw_args, resolver)
+        bind(run, args, resolver)
     assert message in str(exc.value)
+
+
+def test_check_reports_every_problem_without_resolving():
+    def run(
+        path, metadata, ctx, width: int, dst: action.Remote, mode: str = "fast"
+    ): ...
+
+    assert check(run, {"width": 800, "dst": "photos"}) == []
+    assert check(run, {"width": "800", "dst": "anything"}) == []  # names resolve at run
+    assert check(run, {"widht": 1, "dst": 3}) == [
+        "unknown parameter(s) widht",
+        "missing required parameter(s) width",
+        "dst: expected a remote name, got int",
+    ]
+    assert check(run, {"width": "eight", "dst": "x"}) == [
+        "width: Input should be a valid integer, unable to parse string as an integer"
+    ]
+    assert check(run, {"width": 1, "dst": "x", "exclude": []}) == [
+        "unknown parameter(s) exclude"
+    ]
+
+    def reserved(path, metadata, ctx, exclude: str): ...
+
+    (problem,) = check(reserved, {})
+    assert "'exclude' is reserved by .tfsfunctions.yaml" in problem
+
+
+def test_by_position_keys_legacy_marker_strings_by_parameter_name():
+    def run(path, metadata, ctx, width: int, dst: action.Remote): ...
+
+    assert by_position(run, ("800", "photos")) == {"width": "800", "dst": "photos"}
+    assert by_position(run, ("800",)) == {"width": "800"}
+    assert by_position(run, ("1", "2", "3")) == {
+        "width": "1",
+        "dst": "2",
+        "_extra": ["3"],
+    }
 
 
 def test_path_args_need_a_resolver():
     def run(path, metadata, ctx, dst: action.Remote): ...
 
     with pytest.raises(BindingError):
-        bind(run, ("photos",))
+        bind(run, {"dst": "photos"})
 
 
 def test_bool_coercion_follows_pydantic_lax_rules():
     def run(path, metadata, ctx, flag: bool): ...
 
-    assert bind(run, ("true",)).kwargs == {"flag": True}
-    assert bind(run, ("0",)).kwargs == {"flag": False}
+    assert bind(run, {"flag": "true"}).kwargs == {"flag": True}
+    assert bind(run, {"flag": "0"}).kwargs == {"flag": False}
+    assert bind(run, {"flag": True}).kwargs == {"flag": True}
     with pytest.raises(BindingError):
-        bind(run, ("maybe",))
+        bind(run, {"flag": "maybe"})
 
 
 def test_bare_decorators_are_type_errors():
@@ -240,14 +291,18 @@ def test_path_marker_survives_optional_and_annotated_metadata():
         ("b", "remote"),
         ("n", None),
     ]
-    bound = bind(run, ("x", "y", "3"), resolver)
+    bound = bind(run, {"a": "x", "b": "y", "n": "3"}, resolver)
     assert bound.kwargs == {
         "a": Path("/resolved/tagdir/x"),
         "b": Path("/resolved/remote/y"),
         "n": 3,
     }
     with pytest.raises(BindingError):
-        bind(run, ("x", "y", "0"), resolver)  # Field(gt=0) still enforced
+        bind(
+            run, {"a": "x", "b": "y", "n": "0"}, resolver
+        )  # Field(gt=0) still enforced
+    with pytest.raises(BindingError):
+        bind(run, {"a": "x", "b": "y", "n": 0}, resolver)
     schema = signature_schema(run)
     assert schema["properties"]["a"]["x-tfs-path"] == "tagdir"
     assert schema["properties"]["b"]["x-tfs-path"] == "remote"
@@ -295,15 +350,18 @@ def test_literal_members_are_coerced_by_their_own_type():
         p, m, c, size: Literal[800, 1600], mode: Literal["fast", "slow"] = "fast"
     ): ...
 
-    assert bind(run, ("800",)).kwargs == {"size": 800, "mode": "fast"}
+    assert bind(run, {"size": "800"}).kwargs == {"size": 800, "mode": "fast"}
+    assert bind(run, {"size": 800}).kwargs == {"size": 800, "mode": "fast"}
     with pytest.raises(BindingError):
-        bind(run, ("801",))
+        bind(run, {"size": "801"})
+    with pytest.raises(BindingError):
+        bind(run, {"size": 801})
 
 
 def test_any_parameter_name_is_bindable():
     def run(p, m, c, _n: int, model_config: str = "x", schema: str = "y"): ...
 
-    bound = bind(run, ("1", "cfg"))
+    bound = bind(run, {"_n": "1", "model_config": "cfg"})
     assert bound.kwargs == {"_n": 1, "model_config": "cfg", "schema": "y"}
     assert set(signature_schema(run)["properties"]) == {"_n", "model_config", "schema"}
 
@@ -311,17 +369,18 @@ def test_any_parameter_name_is_bindable():
 def test_literal_bools_use_yes_no_parsing():
     def run(p, m, c, flag: Literal[True, False]): ...
 
-    assert bind(run, ("false",)).kwargs == {"flag": False}
-    assert bind(run, ("0",)).kwargs == {"flag": False}
-    assert bind(run, ("yes",)).kwargs == {"flag": True}
+    assert bind(run, {"flag": "false"}).kwargs == {"flag": False}
+    assert bind(run, {"flag": "0"}).kwargs == {"flag": False}
+    assert bind(run, {"flag": "yes"}).kwargs == {"flag": True}
+    assert bind(run, {"flag": False}).kwargs == {"flag": False}
 
 
 def test_defaults_are_copied_per_bind():
     def run(p, m, c, items: list = []): ...  # noqa: B006 - the point of the test
 
-    first = bind(run, ()).kwargs["items"]
+    first = bind(run, {}).kwargs["items"]
     first.append(9)
-    assert bind(run, ()).kwargs["items"] == []
+    assert bind(run, {}).kwargs["items"] == []
 
 
 def test_uncopyable_defaults_are_shared_not_fatal():
@@ -331,7 +390,7 @@ def test_uncopyable_defaults_are_shared_not_fatal():
 
     def run(p, m, c, guard: object = lock): ...
 
-    assert bind(run, ()).kwargs["guard"] is lock
+    assert bind(run, {}).kwargs["guard"] is lock
 
 
 def test_unschemable_annotations_are_signature_errors():
@@ -344,8 +403,8 @@ def test_unschemable_annotations_are_signature_errors():
 
     with pytest.raises(SignatureError):
         signature_schema(a)
-    with pytest.raises(SignatureError):
-        bind(b, ("x",))
+    with pytest.raises(BindingError, match="cannot bind t"):
+        bind(b, {"t": "x"})  # check() folds the signature error into the binding
 
 
 def test_nested_path_args_have_a_clear_message():
@@ -362,7 +421,7 @@ def test_resolver_failures_of_any_kind_are_binding_errors():
         raise OSError("disk gone")
 
     with pytest.raises(BindingError, match="disk gone"):
-        bind(run, ("x",), broken)
+        bind(run, {"dst": "x"}, broken)
 
 
 # ------------------------------------------------------------------ schema

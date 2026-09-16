@@ -51,18 +51,23 @@ def root(tmp_path: Path) -> Root:
     result = runner.invoke(app, ["init", str(tmp_path / "vault")])
     assert result.exit_code == 0, result.output
     root = Root(tmp_path / "vault")
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, port=free_port(), stop_timeout_seconds=0.5
+        )
+    ).write(root.config_path)
     (root.script_dir / "copy.py").write_text(textwrap.dedent(ADDON), encoding="utf-8")
-    (root.path / "@@copy" / "a--photo.txt").parent.mkdir()
-    (root.path / "@@copy" / "a--photo.txt").write_text("a")
+    (root.path / "copy" / "a--photo.txt").parent.mkdir()
+    (root.path / "copy" / "a--photo.txt").write_text("a")
+    (root.path / "copy" / ".tfsfunctions.yaml").write_text(
+        "version: 1\nfunctions:\n  copy:\n    run: {}\n", encoding="utf-8"
+    )
     return root
 
 
 @pytest.fixture
-def daemon(root: Root):
-    d = Daemon(root, control=True, poll_ms=50)
+def daemon(root: Root, tmp_path: Path):
+    d = Daemon(root, control=True, poll_ms=50, ui_dir=tmp_path / "no-dist")
     d.startup()
     thread = threading.Thread(target=d.run_forever, daemon=True)
     thread.start()
@@ -128,14 +133,14 @@ def test_list_and_query_through_the_daemon(root: Root, daemon: Daemon):
 
     found = tfs("query", "--root", str(root.path), "-t", "photo")
     assert found.exit_code == 0, found.output
-    assert "@@copy/a--photo.txt" in found.output and "tags: photo" in found.output
+    assert "copy/a--photo.txt" in found.output and "tags: photo" in found.output
 
     nothing = tfs("query", "--root", str(root.path), "-t", "nope")
     assert "(no files)" in nothing.output
 
     with_runs = json.loads(
         tfs(
-            "query", "--root", str(root.path), "--under", "@@copy", "--runs", "--json"
+            "query", "--root", str(root.path), "--under", "copy", "--runs", "--json"
         ).output
     )
     assert with_runs[0]["runs"][0]["action_name"] == "copy"
@@ -152,7 +157,7 @@ def test_query_falls_back_to_the_database(root: Root):
     result = tfs("query", "--root", str(root.path), "-t", "photo", "--runs")
 
     assert result.exit_code == 0, result.output
-    assert "@@copy/a--photo.txt" in result.output
+    assert "copy/a--photo.txt" in result.output
     assert "copy added ok" in result.output
 
 
@@ -211,9 +216,11 @@ def test_start_detached_reports_a_child_that_dies(root: Root, daemon: Daemon):
     while daemon.backend.is_open and time.time() < deadline:
         time.sleep(0.05)
     config = root.load_config()
-    Config(daemon=DaemonConfig(bind="203.0.113.1", port=config.daemon.port)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, bind="203.0.113.1", port=config.daemon.port
+        )
+    ).write(root.config_path)
 
     result = tfs("start", "-d", "--root", str(root.path))
 
@@ -258,9 +265,11 @@ def test_stop_reaches_the_daemon_after_the_config_port_changed(
     root: Root, daemon: Daemon
 ):
     config = root.load_config()
-    Config(daemon=DaemonConfig(port=free_port(), stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, port=free_port(), stop_timeout_seconds=0.5
+        )
+    ).write(root.config_path)
     holder = Lock(root).holder()
     assert holder is not None and holder.port == config.daemon.port
 
@@ -301,10 +310,12 @@ def test_stop_is_graceful_for_an_ipv6_daemon(root: Root):
             port = s.getsockname()[1]
     except OSError:
         pytest.skip("no IPv6 loopback here")
-    Config(daemon=DaemonConfig(bind="::1", port=port, stop_timeout_seconds=0.5)).write(
-        root.config_path
-    )
-    d = Daemon(root, control=True, poll_ms=50)
+    Config(
+        daemon=DaemonConfig(
+            max_concurrent_runs=0, bind="::1", port=port, stop_timeout_seconds=0.5
+        )
+    ).write(root.config_path)
+    d = Daemon(root, control=True, poll_ms=50, ui_dir=root.path.parent / "no-dist")
     d.startup()
     thread = threading.Thread(target=d.run_forever, daemon=True)
     thread.start()
@@ -343,7 +354,7 @@ def test_fallbacks_survive_a_broken_config_or_token(root: Root):
 
     assert tfs("list", "--root", str(root.path)).exit_code == 0
     assert (
-        "@@copy/a--photo.txt"
+        "copy/a--photo.txt"
         in tfs("query", "--root", str(root.path), "-t", "photo").output
     )
     stop = tfs("stop", "--root", str(root.path))
@@ -412,3 +423,84 @@ def test_start_foreground_runs_until_stopped(root: Root):
     assert box["result"].exit_code == 0, box["result"].output
     assert "watching" in box["result"].output and "stopped" in box["result"].output
     assert not root.lock_path.exists()
+
+
+def test_start_log_console_writes_the_log_to_the_console_too(root: Root):
+    """`tfs start --log-console` (Docker, a service manager that collects the
+    console): the log keeps going to [logging] file and reaches stdout as
+    well (DESIGN/v0-5-0.md §10.3)."""
+    import logging
+
+    from tag_file_system.core import logger as core_logger
+    from tag_file_system.services.control import ControlClient
+
+    config = root.load_config()
+    client = ControlClient(
+        config.daemon.bind, config.daemon.port, root.read_token(), timeout=2
+    )
+    box: dict = {}
+
+    def run() -> None:
+        box["result"] = tfs("start", "--log-console", "--root", str(root.path))
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            if client.health()["started"]:
+                break
+        except Exception:
+            time.sleep(0.1)
+    else:
+        pytest.fail("daemon did not come up")
+    handlers = {type(h) for h in core_logger._configured}
+
+    client.stop()
+    thread.join(15)
+
+    assert not thread.is_alive()
+    assert box["result"].exit_code == 0, box["result"].output
+    assert "logging to" in box["result"].output
+    assert "and the console" in box["result"].output
+    assert handlers == {logging.FileHandler, logging.StreamHandler}
+    assert (root.path / config.logging.file).read_text(encoding="utf-8")
+
+
+def test_start_log_console_is_foreground_only(root: Root):
+    result = tfs("start", "-d", "--log-console", "--root", str(root.path))
+    assert result.exit_code == 2
+    assert "--log-console" in result.output and "drop -d" in result.output
+    assert not root.lock_path.exists()
+
+
+# ---------------------------------------------------------------------- ui
+
+
+def test_ui_prints_the_address_with_the_token_in_the_fragment(
+    root: Root, daemon: Daemon, monkeypatch: pytest.MonkeyPatch
+):
+    import webbrowser
+
+    opened: list[str] = []
+    monkeypatch.setattr(webbrowser, "open", lambda url: opened.append(url) or True)
+    config = root.load_config()
+
+    result = tfs("ui", "--root", str(root.path))
+
+    assert result.exit_code == 0, result.output
+    url = f"http://127.0.0.1:{config.daemon.port}/ui/#token={root.read_token()}"
+    assert url in result.output
+    assert "not built" in result.output  # the fixture's daemon has no dist
+    assert opened == []
+
+    result = tfs("ui", "--root", str(root.path), "--open")
+    assert result.exit_code == 0, result.output
+    assert opened == [url]
+
+
+def test_ui_needs_a_daemon(root: Root):
+    result = tfs("ui", "--root", str(root.path))
+
+    assert result.exit_code == 1
+    assert "no daemon answers" in result.output and "tfs start -d" in result.output

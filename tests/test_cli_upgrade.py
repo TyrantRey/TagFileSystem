@@ -39,7 +39,9 @@ def root(tmp_path: Path) -> Root:
     result = tfs("init", str(tmp_path / "vault"))
     assert result.exit_code == 0, result.output
     root = Root(tmp_path / "vault")
-    Config(daemon=DaemonConfig(port=free_port())).write(root.config_path)
+    Config(daemon=DaemonConfig(max_concurrent_runs=0, port=free_port())).write(
+        root.config_path
+    )
     return root
 
 
@@ -167,7 +169,7 @@ def test_update_reports_against_the_checkout(
     assert result.exit_code == 0, result.output
     assert "current   0.9.0" in result.output and "v1.0.0 = 1.0.0" in result.output
     assert "available" in result.output and "tfs upgrade" in result.output
-    assert "schema    1 -> 2" in result.output
+    assert "schema    2 -> 3" in result.output
 
     as_json = json.loads(tfs("update", "--root", str(root.path), "--json").output)
     assert as_json["available"] is True and as_json["latest"]["tag"] == "v1.0.0"

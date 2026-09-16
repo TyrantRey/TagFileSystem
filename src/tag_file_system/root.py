@@ -30,6 +30,7 @@ DB_DIR = "db"
 DB_FILE = "system.db"
 LOCK_FILE = "lock"
 TOKEN_FILE = "token"
+FUNCTIONS_FILE = ".tfsfunctions.yaml"  # per-folder configuration (DESIGN/v0-4-0.md §3)
 
 # A lock from *another host* older than this is assumed abandoned (its pid
 # cannot be checked from here). Locks from this host are judged by the pid.
@@ -74,10 +75,11 @@ class Zone(StrEnum):
 
     TFS = "tfs"  # .tfs/: ignored by the watcher
     SCRIPT = "script"  # script/: add-ons, routed to the reloader
+    FUNCTIONS = "functions"  # a .tfsfunctions.yaml: read at start/reload, never indexed
     DATA = "data"  # everything else: the pipeline
 
 
-def _same_name(a: str, b: str) -> bool:
+def same_name(a: str, b: str) -> bool:
     """Compare path components the way the host filesystem does."""
     return os.path.normcase(a) == os.path.normcase(b)
 
@@ -251,10 +253,12 @@ class Root:
         parts = self.relative(path).parts
         if not parts:
             return Zone.DATA
-        if any(_same_name(part, TFS_DIR) for part in parts):
+        if any(same_name(part, TFS_DIR) for part in parts):
             return Zone.TFS
-        if _same_name(parts[0], SCRIPT_DIR):
+        if same_name(parts[0], SCRIPT_DIR):
             return Zone.SCRIPT
+        if same_name(parts[-1], FUNCTIONS_FILE):
+            return Zone.FUNCTIONS
         return Zone.DATA
 
 

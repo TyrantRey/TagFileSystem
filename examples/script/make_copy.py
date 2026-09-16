@@ -1,15 +1,24 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Demo add-on: copy every file that lands under ``@@make_copy__<suffix>__<remote>/``.
+"""Demo add-on: copy every file in a folder that switches it on.
 
 Put this file in ``<root>/script/``, add a remote to ``.tfs/config.toml``:
 
     [remotes]
     backup = "/home/photo/backup"      # or "D:\\backup" on Windows
 
-then create ``<root>/@@make_copy__.jpg__backup/`` and drop files into it.
-Edit this file while the daemon runs: it is reloaded on save (``tfs list``
-shows the new signature), and the next file uses the new code.
+then give a folder a ``.tfsfunctions.yaml`` (DESIGN/v0-4-0.md §3):
+
+    version: 1
+    functions:
+      make_copy:
+        run:  {suffix: .jpg, dst: backup}
+        gone: {suffix: .jpg, dst: backup}
+
+and drop files into it (``tfs reload`` applies a file edited while the
+daemon runs; ``tfs explain <file>`` shows what applies to it). Edit this
+script while the daemon runs: it is reloaded on save (``tfs list`` shows the
+new signature), and the next file uses the new code.
 """
 
 from pathlib import Path
@@ -26,7 +35,7 @@ def run(
         ctx.log(f"skipping {path.name}: not a {suffix}")
         return "skipped"
     if dst is None:
-        raise ValueError("make_copy needs a remote: @@make_copy__.jpg__<remote>")
+        raise ValueError("make_copy needs a remote: dst: <remote> in .tfsfunctions.yaml")
     target = ctx.copy(
         path, dst / path.name
     )  # traced, and recorded as produced by this run

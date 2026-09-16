@@ -54,8 +54,16 @@ jobs:
       - name: Test
         run: uv run pytest -q --durations=10
 
+      - name: Install Node (for the web UI's build in the smoke test)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+
       # The console script, a real root and a real daemon: the parts the
-      # unit tests exercise in-process.
+      # unit tests exercise in-process. Then the API and the web UI
+      # (DESIGN/v0-5-0.md): 503 before the build, 200 after it, no restart.
       - name: Smoke test the tfs command
         shell: bash
         run: |
@@ -71,6 +79,36 @@ jobs:
           uv run tfs --root "$root" start -d
           uv run tfs --root "$root" list
           uv run tfs --root "$root" backup list
+
+          port=$(python -c "import json,sys; print(json.load(open(sys.argv[1]))['port'])" "$root/.tfs/lock")
+          token=$(cat "$root/.tfs/token")
+          base="http://127.0.0.1:$port"
+          status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
+          test "$(status "$base/ui/")" = 503
+          curl -s "$base/ui/" | grep -q "UI not built"
+          test "$(status "$base/api/v1/status")" = 401
+          curl -sf -H "Authorization: Bearer $token" "$base/api/v1/status" | grep -q '"built": false'
+          (cd Frontend && npm ci --no-audit --no-fund && npm run build)
+          test "$(status "$base/ui/")" = 200
+          curl -s "$base/ui/" | grep -qi "<!doctype html"
+          curl -sf -H "Authorization: Bearer $token" "$base/api/v1/status" | grep -q '"built": true'
+          uv run tfs --root "$root" ui | grep -q "/ui/#token="
+          # The operator's commands (DESIGN/v0-5-0.md §11) through the daemon.
+          uv run tfs --root "$root" status | grep -q "daemon pid"
+          uv run tfs --root "$root" doctor
+          uv run tfs --root "$root" plan | grep -q "would run"
+          uv run tfs --root "$root" touch "2024--trip/made--by-cli.txt" | grep -q "created 2024--trip/made--by-cli.txt"
+          uv run tfs --root "$root" mv "2024--trip/made--by-cli.txt" "2024--trip/moved.txt" | grep -q "moved 2024--trip/made--by-cli.txt"
+          uv run tfs --root "$root" rm "2024--trip/moved.txt" | grep -q "removed 2024--trip/moved.txt"
+          uv run tfs --root "$root" pause | grep -q "^paused"
+          uv run tfs --root "$root" resume | grep -q "^resumed"
+          # The browser's writes (DESIGN/v0-5-0.md §12), as curl does them.
+          curl -sf -X POST -H "Authorization: Bearer $token" --data-binary "uploaded" \
+            "$base/api/v1/files/upload?path=2024--trip/up--draft.txt" | grep -q '"created": true'
+          test "$(curl -sf -H "Authorization: Bearer $token" "$base/api/v1/file/content?path=2024--trip/up--draft.txt")" = "uploaded"
+          curl -sf -X POST -H "Authorization: Bearer $token" -H "Content-Type: application/json" \
+            -d '{"add": ["hot"]}' "$base/api/v1/file/tags?path=2024--trip/up--draft.txt" | grep -q '"added": \["hot"\]'
+          uv run tfs --root "$root" untag "2024--trip/up--draft.txt" hot | grep -q "removed: hot"
           # `upgrade` is dispatched by the stdlib shim; --help must work
           # without a checkout state the preflight would accept.
           uv run tfs upgrade --help | grep -q "usage: tfs upgrade"
@@ -97,3 +135,107 @@ jobs:
 
           uv run tfs --root "$root" stop
           test ! -f "$root/.tfs/lock"
+
+  frontend:
+    # The web UI on its own: lint, format, unit tests, a production build.
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: Frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: Frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm test
+      - run: npm run build
+
+  docker:
+    # The image and the compose file (DESIGN/v0-5-0.md §10.5): build, start on
+    # a fresh root, check the API and the UI through the published port,
+    # stop cleanly, and come back after a SIGKILL.
+    name: docker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build the image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: tagfilesystem:ci
+          build-args: GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test the container
+        shell: bash
+        env:
+          TFS_IMAGE_TAG: ci
+        run: |
+          set -euo pipefail
+          root="$PWD/ci-docker-root"
+          mkdir -p "$root"
+          export TFS_ROOT="$root" PUID="$(id -u)" PGID="$(id -g)"
+          base="http://127.0.0.1:7411"
+
+          wait_healthy() {
+            local id state=none
+            for _ in $(seq 1 45); do
+              id=$(docker compose ps -q tfs || true)
+              [ -n "$id" ] && state=$(docker inspect -f '{{.State.Health.Status}}' "$id" || echo none)
+              [ "$state" = healthy ] && return 0
+              sleep 2
+            done
+            echo "container never became healthy (last: $state)" >&2
+            docker compose logs tfs >&2
+            return 1
+          }
+
+          docker compose up -d --no-build
+          wait_healthy
+          token=$(cat "$root/.tfs/token")
+          grep -q '^bind = "0.0.0.0"' "$root/.tfs/config.toml"
+          curl -sf -H "Authorization: Bearer $token" "$base/health" | grep -q "\"hash\": \"${{ github.sha }}\""
+          curl -sf "$base/ui/" | grep -qi "<!doctype html"
+          curl -sf -H "Authorization: Bearer $token" "$base/api/v1/status" | grep -q '"built": true'
+
+          mkdir -p "$root/2024--trip"
+          echo "hello" > "$root/2024--trip/note--draft.txt"
+          found=""
+          for _ in $(seq 1 30); do
+            out=$(docker compose exec -T tfs tfs query -t trip || true)
+            case "$out" in *"note--draft.txt"*) found="$out"; break ;; esac
+            sleep 1
+          done
+          if [ -z "$found" ]; then
+            echo "note--draft.txt never appeared; last query said: ${out:-<empty>}" >&2
+            docker compose logs tfs >&2
+            exit 1
+          fi
+          echo "$found"
+          docker compose exec -T tfs tfs ui | grep -q "/ui/#token="
+          docker compose exec -T tfs tfs list | grep -q "tfs 0."
+          docker compose exec -T tfs tfs status | grep -q "daemon pid"
+          docker compose logs tfs | grep -q "Daemon ready"   # the log reaches the console
+
+          # A clean stop releases the lock; a SIGKILL leaves it, and the same
+          # container removes it at the next start.
+          docker compose stop
+          test ! -f "$root/.tfs/lock"
+          docker compose start
+          wait_healthy
+          docker compose kill
+          test -f "$root/.tfs/lock"
+          docker compose start
+          wait_healthy
+          docker compose logs tfs | grep -q "removing the lock left by an earlier run"
+          docker compose down

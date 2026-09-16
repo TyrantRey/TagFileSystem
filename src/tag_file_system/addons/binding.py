@@ -17,15 +17,29 @@ from dataclasses import dataclass, field
 from functools import reduce
 from operator import or_
 from pathlib import Path, PurePath
-from typing import Annotated, Any, Callable, Literal, Union, get_args, get_origin
+from typing import (
+    Annotated,
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    Union,
+    get_args,
+    get_origin,
+)
 
 from pydantic import TypeAdapter, ValidationError
 
 from tag_file_system.action import PathArg
+from tag_file_system.root import FUNCTIONS_FILE
 
 FIXED_PARAMETERS = 3  # path, metadata, ctx
 PROBLEM_PARAMETERS = 2  # problem, ctx
 LIFECYCLE_PARAMETERS = 1  # ctx
+
+# Keys of a handler's block in .tfsfunctions.yaml that are not parameters
+# (DESIGN/v0-4-0.md §3.1): a handler cannot declare a parameter by these names.
+RESERVED_PARAMETERS = frozenset({"exclude"})
 
 PathResolver = Callable[[str, str], Path]  # (kind, raw) -> resolved path
 
@@ -67,12 +81,12 @@ class Parameter:
 
 @dataclass
 class BoundArgs:
-    """``kwargs`` is what the handler is called with; ``raw`` is the run key's
-    ``args`` — the slug strings keyed by parameter name, so the key does not
-    depend on how a remote resolves today."""
+    """``kwargs`` is what the handler is called with: the entry's values
+    coerced through the annotations, path-valued ones resolved. The run key
+    keeps the entry's own values, so it does not depend on how a remote
+    resolves today."""
 
     kwargs: dict[str, Any] = field(default_factory=dict)
-    raw: dict[str, str] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------- annotations
@@ -186,6 +200,10 @@ def _adapters(func: Callable) -> tuple[list[Parameter], list[TypeAdapter]]:
     params = parameters_of(func)
     adapters: list[TypeAdapter] = []
     for p in params:
+        if p.name in RESERVED_PARAMETERS:
+            raise SignatureError(
+                f"{callable_name(func)}: parameter {p.name!r} is reserved by {FUNCTIONS_FILE}"
+            )
         try:
             adapter = TypeAdapter(p.annotation)
             adapter.json_schema()  # un-schemable annotations fail here, at load
@@ -237,10 +255,11 @@ def signature_schema(func: Callable) -> dict[str, Any]:
 # ----------------------------------------------------------------- binding
 
 
-def _coerce_literal(annotation: Any, raw: str) -> Any:
-    """``Literal[800, 1600]`` from the slug string ``"800"``: a literal's
-    members carry their own type, so try each member's type."""
-    if get_origin(annotation) is not Literal:
+def _coerce_literal(annotation: Any, raw: Any) -> Any:
+    """``Literal[800, 1600]`` from the string ``"800"``: a literal's members
+    carry their own type, so try each member's type. A value that is not a
+    string (YAML gave it its type already) is left to pydantic as it is."""
+    if not isinstance(raw, str) or get_origin(annotation) is not Literal:
         return raw
     for member in get_args(annotation):
         if isinstance(member, str):
@@ -266,38 +285,66 @@ def _coerce_literal(annotation: Any, raw: str) -> Any:
 _BOOL = TypeAdapter(bool)
 
 
-def raw_by_name(
-    func: Callable, raw_args: tuple[str, ...] | list[str]
-) -> dict[str, Any]:
-    """The run-key ``args`` for a call: slug strings keyed by parameter name,
-    computable even when binding will fail (so a failed binding and a later
-    success share one key). Surplus positional strings go under ``_extra``."""
-    params, _ = _adapters(func)
-    raw: dict[str, Any] = {p.name: value for p, value in zip(params, raw_args)}
-    if len(raw_args) > len(params):
-        raw["_extra"] = list(raw_args[len(params) :])
-    return raw
+def check(func: Callable, args: Mapping[str, Any]) -> list[str]:
+    """Every reason ``args`` (a configuration entry's parameters, by name)
+    cannot bind to ``func`` — without resolving path-valued ones, whose names
+    are a run-time question. Empty when they bind. This is what a
+    ``.tfsfunctions.yaml`` entry is validated with at load."""
+    try:
+        params, adapters = _adapters(func)
+    except SignatureError as e:
+        return [str(e)]
+    messages: list[str] = []
+    known = {p.name for p in params}
+    unknown = sorted(name for name in args if name not in known)
+    if unknown:
+        messages.append(f"unknown parameter(s) {', '.join(unknown)}")
+    missing = [p.name for p in params if p.required and p.name not in args]
+    if missing:
+        messages.append(f"missing required parameter(s) {', '.join(missing)}")
+    for p, adapter in zip(params, adapters):
+        if p.name not in args:
+            continue
+        value = args[p.name]
+        if p.path_kind:
+            if not isinstance(value, str):
+                messages.append(
+                    f"{p.name}: expected a {p.path_kind} name, got {type(value).__name__}"
+                )
+            continue
+        try:
+            adapter.validate_python(_coerce_literal(p.annotation, value))
+        except ValidationError as e:
+            details = "; ".join(err["msg"] for err in e.errors())
+            messages.append(f"{p.name}: {details}")
+    return messages
 
 
 def bind(
     func: Callable,
-    raw_args: tuple[str, ...] | list[str],
+    args: Mapping[str, Any],
     resolver: PathResolver | None = None,
 ) -> BoundArgs:
-    """Match the slug's positional strings to ``func``'s action parameters."""
-    params, adapters = _adapters(func)
+    """Bind ``args`` by name to ``func``'s action parameters: each value is
+    coerced through its annotation, ``TagDir``/``Remote`` ones are resolved
+    first, and unsupplied parameters take a fresh copy of their default."""
     name = callable_name(func)
-    if len(raw_args) > len(params):
-        raise BindingError(
-            f"{name} takes {len(params)} argument(s), the name gives {len(raw_args)}"
-        )
-    missing = [p.name for p in params[len(raw_args) :] if p.required]
-    if missing:
-        raise BindingError(f"{name} is missing argument(s) {', '.join(missing)}")
-
+    problems = check(func, args)
+    if problems:
+        raise BindingError(f"{name}: {'; '.join(problems)}")
+    params, adapters = _adapters(func)
     bound = BoundArgs()
-    for p, adapter, raw in zip(params, adapters, raw_args):
-        bound.raw[p.name] = raw
+    for p, adapter in zip(params, adapters):
+        if p.name not in args:
+            # A fresh copy per run: a mutable default must not be shared.
+            # Things that cannot be copied (a lock, a stream) are shared on
+            # purpose.
+            try:
+                bound.kwargs[p.name] = copy.deepcopy(p.default)
+            except Exception:
+                bound.kwargs[p.name] = p.default
+            continue
+        raw = args[p.name]
         if p.path_kind:
             if resolver is None:
                 raise BindingError(f"{p.name}: no resolver for {p.path_kind} arguments")
@@ -312,11 +359,17 @@ def bind(
         except ValidationError as e:
             details = "; ".join(err["msg"] for err in e.errors())
             raise BindingError(f"{name}: {p.name}: {details}") from e
-    for p in params[len(raw_args) :]:
-        # A fresh copy per run: a mutable default must not be shared. Things
-        # that cannot be copied (a lock, a stream) are shared on purpose.
-        try:
-            bound.kwargs[p.name] = copy.deepcopy(p.default)
-        except Exception:
-            bound.kwargs[p.name] = p.default
     return bound
+
+
+def by_position(
+    func: Callable, raw_args: tuple[str, ...] | list[str]
+) -> dict[str, Any]:
+    """Positional strings keyed by parameter name — what the v1 ``@@`` marker
+    gave; surplus strings go under ``_extra`` so the key still forms. Kept for
+    ``tfs migrate``, which turns old directory names into configuration."""
+    params, _ = _adapters(func)
+    args: dict[str, Any] = {p.name: value for p, value in zip(params, raw_args)}
+    if len(raw_args) > len(params):
+        args["_extra"] = list(raw_args[len(params) :])
+    return args

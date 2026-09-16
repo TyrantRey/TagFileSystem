@@ -1,0 +1,7 @@
+# Code by AkinoAlice@TyrantRey
+# Packages the add-ons in the root's script/ import, one per line in pip
+# requirement syntax; the Dockerfile installs them into the image.
+# Rebuild after a change: docker compose build
+#
+# pillow>=11
+# requests>=2.32

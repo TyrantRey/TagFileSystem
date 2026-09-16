@@ -3,23 +3,26 @@
 import sys
 import textwrap
 import time
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from tag_file_system.addons.loader import MODULE_PREFIX, AddonLoader
 from tag_file_system.addons.runner import ActionRunner
 from tag_file_system.config import Config, DaemonConfig
 from tag_file_system.core.interface.action import (
     Hook,
+    RunKey,
     RunSource,
     RunStatus,
     Severity,
 )
 from tag_file_system.database.action_store import ActionStore
 from tag_file_system.database.sqlite import SQLiteBackend
-from tag_file_system.root import Root
+from tag_file_system.functions import FunctionsStore
+from tag_file_system.root import FUNCTIONS_FILE, Root
 
 
 @pytest.fixture(autouse=True)
@@ -36,20 +39,29 @@ def env(tmp_path: Path):
     backend.init_database(root.db_path, root_dir=root.path)
     store = ActionStore(backend)
     loader = AddonLoader(root, store=store)
+    functions = FunctionsStore(root, loader)
     config = Config(
         daemon=DaemonConfig(run_warn_after_seconds=0.05, stop_timeout_seconds=0.2),
         remotes={"backup": str(tmp_path / "backup")},
     )
     runner = ActionRunner(
-        root, backend, store, loader, config=config, max_chain_depth=3
+        root,
+        backend,
+        store,
+        loader,
+        config=config,
+        max_chain_depth=3,
+        functions=functions,
     )
     loader.report = runner.problem
+    functions.report = runner.problem
     (tmp_path / "backup").mkdir()
     yield SimpleNamespace(
         root=root,
         backend=backend,
         store=store,
         loader=loader,
+        functions=functions,
         runner=runner,
         tmp=tmp_path,
     )
@@ -61,6 +73,25 @@ def script(env, name: str, source: str) -> None:
         textwrap.dedent(source), encoding="utf-8"
     )
     env.loader.load_all()
+    env.functions.rebind()
+
+
+def functions(env, folder: str, text: str) -> None:
+    """Write ``folder``'s ``.tfsfunctions.yaml`` and read the tree again."""
+    directory = env.root.path.joinpath(*folder.split("/")) if folder else env.root.path
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / FUNCTIONS_FILE).write_text(textwrap.dedent(text), encoding="utf-8")
+    env.functions.load_tree()
+
+
+def enable(env, folder: str, *refs: str, **params) -> None:
+    """``enable(env, "job", "make_copy.run", suffix=".md")``: one entry per
+    ``script.handler`` reference, all with the same parameters."""
+    entries: dict[str, dict[str, dict]] = {}
+    for ref in refs:
+        name, handler = ref.split(".")
+        entries.setdefault(name, {})[handler] = dict(params)
+    functions(env, folder, yaml.safe_dump({"version": 1, "functions": entries}))
 
 
 def add_file(env, key: str, content: bytes = b"data"):
@@ -69,7 +100,7 @@ def add_file(env, key: str, content: bytes = b"data"):
     path.write_bytes(content)
     file = env.runner.index(path)
     assert file is not None
-    return path, file, env.runner.parser.parse_path(PurePosixPath(key))
+    return path, file
 
 
 def problems(env, kind: str | None = None):
@@ -96,9 +127,10 @@ MAKE_COPY = """
 
 def test_added_handler_runs_once_with_trace_and_provenance(env):
     script(env, "make_copy", MAKE_COPY)
-    path, file, parsed = add_file(env, "@@make_copy__.md/a.txt")
+    enable(env, "job", "make_copy.run", suffix=".md")
+    path, file = add_file(env, "job/a.txt")
 
-    runs = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    runs = env.runner.on_file(Hook.ADDED, path, file)
 
     assert len(runs) == 1
     run = env.store.get_run(runs[0].id)
@@ -106,7 +138,8 @@ def test_added_handler_runs_once_with_trace_and_provenance(env):
     assert run.status is RunStatus.OK
     assert run.result == {"copied": "a--copy.md", "size": 4}
     assert run.args == {"suffix": ".md"}
-    assert run.slug == "make_copy__.md"
+    assert (run.action_name, run.handler) == ("make_copy", "run")
+    assert run.slug == 'make_copy.run(suffix=".md")'
     assert run.source is RunSource.WATCH
     assert run.file_id == file.file_id
 
@@ -127,49 +160,82 @@ def test_added_handler_runs_once_with_trace_and_provenance(env):
     assert [p.kind for p in problems(env)] == ["run.ok"]
 
     # the same event again: the key exists, nothing re-runs
-    assert env.runner.on_file(Hook.ADDED, path, file, parsed) == []
+    assert env.runner.on_file(Hook.ADDED, path, file) == []
     assert len(env.store.query_runs()) == 1
     assert env.runner.in_flight == {}
 
 
+def test_nothing_runs_without_an_entry(env):
+    script(env, "make_copy", MAKE_COPY)
+    path, file = add_file(env, "job/a.txt")
+
+    assert env.runner.on_file(Hook.ADDED, path, file) == []
+    assert env.runner.on_transition(path, file, None, content_changed=True) == []
+    assert env.store.query_runs() == []
+
+
 def test_generated_file_never_retriggers_its_producer(env):
     script(env, "make_copy", MAKE_COPY.replace('ctx.root / "out" /', "path.parent /"))
-    path, file, parsed = add_file(env, "@@make_copy/a.txt")
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
-    assert env.store.produced_by(run.id) == ["@@make_copy/a--copy.txt"]
+    enable(env, "job", "make_copy.run")
+    path, file = add_file(env, "job/a.txt")
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
+    assert env.store.produced_by(run.id) == ["job/a--copy.txt"]
 
-    copy_path = env.root.absolute("@@make_copy/a--copy.txt")
+    copy_path = env.root.absolute("job/a--copy.txt")
     copy = env.backend.query_file(copy_path)
     assert copy is not None
-    again = env.runner.on_file(
-        Hook.ADDED,
-        copy_path,
-        copy,
-        env.runner.parser.parse_path(PurePosixPath("@@make_copy/a--copy.txt")),
-    )
-
-    assert again == []
+    # the copy sits in the same scope: entering it as a chain was refused,
+    # and the watcher's own event for it finds nothing to do either
+    assert env.runner.on_file(Hook.ADDED, copy_path, copy) == []
     assert len(env.store.query_runs()) == 1
 
 
-def test_unbound_and_binding_problems(env):
+def test_invalid_entries_are_load_problems_and_unresolved_paths_failed_runs(env):
     script(
         env,
         "resize",
         "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: int): pass\n",
     )
-    path, file, parsed = add_file(env, "@@nosuch/@@resize__wide/a.txt")
+    script(
+        env,
+        "ship",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, remote: action.Remote): pass\n",
+    )
+    functions(
+        env,
+        "job",
+        """
+        version: 1
+        functions:
+          nosuch:
+            run: {}
+          resize:
+            run: {width: wide}
+          ship:
+            run: {remote: nowhere}
+        """,
+    )
+    path, file = add_file(env, "job/a.txt")
 
-    runs = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    runs = env.runner.on_file(Hook.ADDED, path, file)
 
-    assert [p.kind for p in problems(env)] == ["action.unbound", "action.binding"]
+    # the two entries that cannot bind were refused at load, once
+    assert [p.kind for p in problems(env)] == [
+        "functions.unbound",
+        "functions.signature",
+        "action.binding",
+    ]
+    unbound = problems(env, "functions.unbound")[0]
+    assert unbound.severity is Severity.ERR and "nosuch" in unbound.message
+    assert "width: Input should be a valid integer" in (
+        problems(env, "functions.signature")[0].message
+    )
+    # a remote is resolved at run time: that failure is a run
     assert len(runs) == 1 and runs[0].status is RunStatus.FAILED
-    assert "binding error" in (runs[0].error or "")
-    unbound = problems(env, "action.unbound")[0]
-    assert unbound.action_name == "nosuch" and unbound.severity is Severity.ERR
-    assert unbound.file_id == file.file_id
+    assert "unknown remote" in (runs[0].error or "")
+    assert problems(env, "action.binding")[0].file_id == file.file_id
     # the failed binding is a dead key: no re-run on the next event
-    assert env.runner.on_file(Hook.ADDED, path, file, parsed) == []
+    assert env.runner.on_file(Hook.ADDED, path, file) == []
 
 
 def test_handler_exception_is_a_failed_run_and_delivered_to_err_handlers(env):
@@ -191,9 +257,10 @@ def test_handler_exception_is_a_failed_run_and_delivered_to_err_handlers(env):
                 ctx.problem("err", "nested")  # logged only, never re-dispatched
         """,
     )
-    path, file, parsed = add_file(env, "@@boom/a.txt")
+    enable(env, "job", "boom.run")
+    path, file = add_file(env, "job/a.txt")
 
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     assert run.status is RunStatus.FAILED
     assert run.error is not None and run.error.startswith("RuntimeError: kaboom")
@@ -253,7 +320,184 @@ def test_replay_undelivered_problems_at_start(env):
     assert env.runner.replay_undelivered() == 0
 
 
-# ------------------------------------------------------------------ chains
+# ------------------------------------------------------------------- scope
+
+
+GUARD = """
+    from tag_file_system import action
+    calls = []
+
+    @action.added()
+    def run(path, metadata, ctx):
+        calls.append("added")
+
+    @action.modified()
+    def changed(path, metadata, ctx):
+        calls.append("modified")
+
+    @action.removed(on_move=True)
+    def gone(path, metadata, ctx):
+        calls.append("removed")
+"""
+
+
+def test_transition_follows_the_file_in_and_out_of_scope(env):
+    # DESIGN/v0-4-0.md §6: gaining an excluded tag is leaving scope; losing
+    # it is entering; a content change while inside is a modification.
+    script(env, "guard", GUARD)
+    functions(
+        env,
+        "job",
+        """
+        version: 1
+        functions:
+          guard:
+            run: {exclude: [{tag: draft}]}
+            changed: {exclude: [{tag: draft}]}
+            gone: {exclude: [{tag: draft}]}
+        """,
+    )
+    calls = env.loader.addon_for("guard").module.calls
+    path, file = add_file(env, "job/a.txt", b"v1")
+
+    env.runner.on_transition(path, file, None, content_changed=True)
+    assert calls == ["added"]
+
+    env.backend.set_file_tags(path, ["draft"])
+    excluded = env.backend.query_file(path)
+    env.runner.on_transition(path, excluded, file, content_changed=False)
+    assert calls == ["added", "removed"]
+
+    path.write_bytes(b"v2")  # edited while excluded: nothing applies
+    edited = env.runner.index(path)
+    env.runner.on_transition(path, edited, excluded, content_changed=True)
+    assert calls == ["added", "removed"]
+
+    env.backend.set_file_tags(path, [])
+    back = env.backend.query_file(path)
+    env.runner.on_transition(path, back, edited, content_changed=False)
+    assert calls == ["added", "removed", "added"]  # a new hash: entering is new work
+
+    path.write_bytes(b"v3")
+    again = env.runner.index(path)
+    env.runner.on_transition(path, again, back, content_changed=True)
+    assert calls == ["added", "removed", "added", "modified"]
+
+    removed = [r for r in env.store.query_runs() if r.hook is Hook.REMOVED]
+    assert len(removed) == 1 and removed[0].slug == "guard.gone()"
+
+
+def test_ctx_tag_and_untag_move_the_file_across_an_exclusion(env):
+    script(env, "guard", GUARD)
+    script(
+        env,
+        "editor",
+        """
+        from tag_file_system import action
+
+        @action.added()
+        def hide(path, metadata, ctx):
+            ctx.tag(path, "draft")
+
+        @action.modified()
+        def show(path, metadata, ctx):
+            ctx.untag(path, "draft")
+        """,
+    )
+    functions(
+        env,
+        "job",
+        """
+        version: 1
+        functions:
+          guard:
+            gone: {exclude: [{tag: draft}]}
+            run: {exclude: [{tag: draft}]}
+          editor:
+            hide: {}
+            show: {}
+        """,
+    )
+    calls = env.loader.addon_for("guard").module.calls
+    path, file = add_file(env, "job/a.txt")
+
+    env.runner.on_file(Hook.ADDED, path, file)
+    assert calls == ["added", "removed"]  # hide() tagged it: guard left scope
+    chained = [r for r in env.store.query_runs() if r.source is RunSource.CHAIN]
+    assert [(r.handler, r.hook) for r in chained] == [("gone", Hook.REMOVED)]
+
+    tagged = env.backend.query_file(path)
+    env.runner.on_file(Hook.MODIFIED, path, tagged)
+    # show() untagged it: guard.run's key already exists for this hash
+    assert calls == ["added", "removed"]
+    assert [t.name for t in env.backend.query_file(path).tags] == []
+
+
+def test_tagged_default_is_suppressed_and_configured_by_a_folder_entry(env):
+    script(
+        env,
+        "photo",
+        """
+        from tag_file_system import action
+
+        @action.tagged("photo")
+        def on_photo(path, metadata, ctx, size: int = 1):
+            return size
+        """,
+    )
+    enable(env, "own", "photo.on_photo", size=9)
+    inside, inside_file = add_file(env, "own/a--photo.txt")
+    outside, outside_file = add_file(env, "x--photo.txt", b"other")
+
+    env.runner.on_transition(inside, inside_file, None, content_changed=True)
+    env.runner.on_transition(outside, outside_file, None, content_changed=True)
+
+    runs = {r.file_id: r for r in env.store.query_runs()}
+    assert len(runs) == 2
+    configured = runs[inside_file.file_id]
+    assert configured.args == {"tag": "photo", "size": 9} and configured.result == 9
+    assert configured.slug == 'photo.on_photo(tag="photo", size=9)'
+    default = runs[outside_file.file_id]
+    assert default.args == {"tag": "photo"} and default.result == 1
+    assert default.slug == 'photo.on_photo(tag="photo")'
+
+
+def test_rescope_offers_every_entry_in_scope_again(env):
+    for name in ("a", "b"):
+        script(
+            env,
+            name,
+            f"from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    return {name!r}\n",
+        )
+    enable(env, "job", "a.run")
+    path, file = add_file(env, "job/x.txt")
+    env.runner.on_transition(path, file, None, content_changed=True)
+    assert [r.action_name for r in env.store.query_runs()] == ["a"]
+
+    enable(env, "job", "a.run", "b.run")  # a reload added b
+    assert env.runner.on_transition(path, file, file, content_changed=False) == []
+    (new,) = env.runner.on_transition(
+        path, file, file, content_changed=False, rescope=True
+    )
+    assert new.action_name == "b"
+    assert sorted(r.action_name for r in env.store.query_runs()) == ["a", "b"]
+
+
+def test_identical_entries_in_parent_and_child_are_one_run(env):
+    script(
+        env,
+        "resize",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: int):\n    return width\n",
+    )
+    enable(env, "", "resize.run", width=800)
+    enable(env, "a", "resize.run", width=800)
+    enable(env, "a/b", "resize.run", width=400)
+    path, file = add_file(env, "a/b/x.txt")
+
+    runs = env.runner.on_file(Hook.ADDED, path, file)
+
+    assert [r.args for r in runs] == [{"width": 800}, {"width": 400}]
+    assert [r.result for r in runs] == [800, 400]  # parent first
 
 
 def test_ctx_tag_chains_into_tagged_handlers_with_depth_limit(env):
@@ -282,9 +526,10 @@ def test_ctx_tag_chains_into_tagged_handlers_with_depth_limit(env):
             ctx.tag(path, "ping")
         """,
     )
-    path, file, parsed = add_file(env, "@@classify/a.txt")
+    enable(env, "job", "classify.run")
+    path, file = add_file(env, "job/a.txt")
 
-    env.runner.on_file(Hook.ADDED, path, file, parsed)
+    env.runner.on_file(Hook.ADDED, path, file)
 
     runs = env.store.query_runs()
     by_hook = [(r.hook, r.args.get("tag"), r.source) for r in reversed(runs)]
@@ -323,15 +568,16 @@ def test_removed_on_move_only_fires_on_move_handlers(env):
             calls.append("gone")
         """,
     )
-    path, file, parsed = add_file(env, "@@cleanup/@@cleanup_move/a.txt")
+    enable(env, "job", "cleanup.on_delete", "cleanup_move.on_gone")
+    path, file = add_file(env, "job/a.txt")
 
-    env.runner.on_file(Hook.REMOVED, path, file, parsed, moved=True)
+    env.runner.on_removed(file, moved=True)
     assert env.loader.addon_for("cleanup").module.calls == []
     assert env.loader.addon_for("cleanup_move").module.calls == ["gone"]
 
     # different content: identical content would share a's run key (§6.1)
-    path_b, file_b, parsed_b = add_file(env, "@@cleanup/@@cleanup_move/b.txt", b"other")
-    env.runner.on_file(Hook.REMOVED, path_b, file_b, parsed_b, moved=False)
+    path_b, file_b = add_file(env, "job/b.txt", b"other")
+    env.runner.on_removed(file_b, moved=False)
     assert env.loader.addon_for("cleanup").module.calls == ["delete"]
     assert env.loader.addon_for("cleanup_move").module.calls == ["gone", "gone"]
 
@@ -358,9 +604,10 @@ def test_spawn_keeps_the_run_open_until_done(env):
             return "ignored-until-done"
         """,
     )
-    path, file, parsed = add_file(env, "@@bg/a.txt")
+    enable(env, "job", "bg.run")
+    path, file = add_file(env, "job/a.txt")
 
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     assert env.store.get_run(run.id).status is RunStatus.RUNNING
     assert run.id in env.runner.in_flight
@@ -397,8 +644,9 @@ def test_stop_interrupts_runs_that_never_finish(env):
             ctx.spawn(lambda: threading.Event().wait(30))
         """,
     )
-    path, file, parsed = add_file(env, "@@stuck/a.txt")
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    enable(env, "job", "stuck.run")
+    path, file = add_file(env, "job/a.txt")
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     interrupted = env.runner.stop(timeout=0.1)
 
@@ -424,9 +672,10 @@ def test_thread_exceptions_become_problems(env):
             ctx.done()
         """,
     )
-    path, file, parsed = add_file(env, "@@bad_thread/a.txt")
+    enable(env, "job", "bad_thread.run")
+    path, file = add_file(env, "job/a.txt")
 
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     # a tracked thread that dies fails the run: nothing would ever call done()
     assert env.store.get_run(run.id).status is RunStatus.FAILED
@@ -443,7 +692,7 @@ LIFECYCLE = """
     @action.on_start()
     def up(ctx):
         ctx.log("service up")
-        ctx.write("out/started.txt", ctx.action_name)
+        ctx.write("out/started.txt", ctx.action_name + "." + ctx.handler_name)
         calls.append(("start", ctx.run_id))
         return "up"
 
@@ -463,10 +712,11 @@ def test_lifecycle_hooks_run_once_per_session(env):
     assert started.source is RunSource.LIFECYCLE
     assert started.file_hash == "" and started.file_id is None
     assert started.args == {"session": env.runner.session}
-    assert started.slug == "on_start"
+    assert started.slug == "on_start" and started.handler == "up"
     # ctx works without a file: the written file is indexed and attributed.
     written = env.backend.query_file("out/started.txt")
     assert written is not None
+    assert env.root.absolute("out/started.txt").read_text() == "service.up"
     assert [
         p.run_id for p in env.store.query_provenance(file_path="out/started.txt")
     ] == [started.id]
@@ -514,7 +764,7 @@ def test_lifecycle_failure_is_a_failed_run_and_is_not_retried(env):
     assert problems(env, "retry.lifecycle")
 
 
-def test_lifecycle_signature_and_duplicate_rules(env):
+def test_lifecycle_signature_rule_and_several_handlers_per_hook(env):
     script(
         env,
         "bad",
@@ -536,11 +786,20 @@ def test_lifecycle_signature_and_duplicate_rules(env):
     )
     addon = env.loader.addon_for("bad")
 
-    assert [h.hook for h in addon.lifecycle_handlers] == [Hook.ON_STOP]
-    assert addon.describe()["hooks"] == ["on_stop"]
+    # Handlers are addressed by name (DESIGN/v0-4-0.md §5): two on_stop
+    # functions are two handlers, each with its own run.
+    assert [h.hook for h in addon.lifecycle_handlers] == [Hook.ON_STOP, Hook.ON_STOP]
+    assert [(h["name"], h["hooks"]) for h in addon.describe()["handlers"]] == [
+        ("down", ["on_stop"]),
+        ("down_again", ["on_stop"]),
+    ]
     assert "on_start handlers take (ctx)" in problems(env, "addon.signature")[0].message
-    assert "down_again" in problems(env, "addon.duplicate_handler")[0].message
-    assert len(env.runner.on_lifecycle(Hook.ON_STOP)) == 1
+    runs = env.runner.on_lifecycle(Hook.ON_STOP)
+    assert [(r.action_name, r.handler) for r in runs] == [
+        ("bad", "down"),
+        ("bad", "down_again"),
+    ]
+    assert env.runner.on_lifecycle(Hook.ON_STOP) == []  # once per session each
 
 
 def test_lifecycle_handler_can_run_a_service_thread(env):
@@ -603,17 +862,46 @@ def test_retry_starts_a_fresh_run_for_a_failed_one(env):
             return "ok now"
         """,
     )
-    path, file, parsed = add_file(env, "@@flaky__2/a.txt")
-    (failed,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
-    assert failed.status is RunStatus.FAILED
+    enable(env, "job", "flaky.run", n=2)
+    path, file = add_file(env, "job/a.txt")
+    (failed,) = env.runner.on_file(Hook.ADDED, path, file)
+    assert failed.status is RunStatus.FAILED and failed.args == {"n": 2}
 
     retried = env.runner.retry(failed.id)
 
     assert retried is not None
     assert retried.status is RunStatus.OK and retried.result == "ok now"
     assert retried.retry_of == failed.id and retried.source is RunSource.RETRY
+    assert retried.slug == "flaky.run(n=2)"
     assert env.loader.addon_for("flaky").module.attempts == [2, 2]
     assert env.runner.retry("nope") is None
+
+
+def test_retry_of_a_run_keyed_before_0_4_is_refused(env):
+    script(
+        env,
+        "old",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, n: int = 1):\n    return n\n",
+    )
+    path, file = add_file(env, "a.txt")
+    record = env.runner._action_record(env.loader.addon_for("old"))
+    legacy = env.store.start_run(
+        record,
+        RunKey(
+            file_hash=file.file_hash,
+            action_name="old",
+            hook=Hook.ADDED,
+            args={"n": "1"},
+        ),
+        "old__1",
+        path,
+        RunSource.WATCH,
+    )
+    env.store.finish_run(legacy.id, RunStatus.FAILED, error="x")
+
+    assert env.runner.retry(legacy.id) is None
+    (why,) = problems(env, "retry.key_changed")
+    assert "old.?" in why.message and "no longer handles" in why.message
 
 
 # ----------------------------------------------------------------- resolve
@@ -634,9 +922,10 @@ def test_resolve_remote_and_tagdir(env):
         """,
     )
     (env.root.path / "2024--archive").mkdir()
-    path, file, parsed = add_file(env, "@@ship__archive__backup/a.txt")
+    enable(env, "job", "ship.run", dst="archive", remote="backup")
+    path, file = add_file(env, "job/a.txt")
 
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     assert run.status is RunStatus.OK, run.error
     assert (env.root.path / "2024--archive" / "a.txt").exists()
@@ -647,28 +936,32 @@ def test_resolve_remote_and_tagdir(env):
     emits = [t.payload for t in env.store.query_trace(run.id) if t.kind == "emit"]
     assert emits[1]["indexed"] is False
 
-    path3, file3, parsed3 = add_file(env, "@@ship__nowhere__backup/c.txt", b"c")
-    (run3,) = env.runner.on_file(Hook.ADDED, path3, file3, parsed3)
+    enable(env, "nowhere", "ship.run", dst="nowhere", remote="backup")
+    path3, file3 = add_file(env, "nowhere/c.txt", b"c")
+    (run3,) = env.runner.on_file(Hook.ADDED, path3, file3)
     assert "no directory carries the tag" in (run3.error or "")
-    path4, file4, parsed4 = add_file(env, "@@ship__archive__nas/d.txt", b"d")
-    (run4,) = env.runner.on_file(Hook.ADDED, path4, file4, parsed4)
+    enable(env, "nas", "ship.run", dst="archive", remote="nas")
+    path4, file4 = add_file(env, "nas/d.txt", b"d")
+    (run4,) = env.runner.on_file(Hook.ADDED, path4, file4)
     assert "unknown remote" in (run4.error or "")
 
     (env.root.path / "old--archive").mkdir()
-    path2, file2, parsed2 = add_file(env, "@@ship__archive__backup/b.txt", b"b")
-    (run2,) = env.runner.on_file(Hook.ADDED, path2, file2, parsed2)
+    path2, file2 = add_file(env, "job/b.txt", b"b")
+    (run2,) = env.runner.on_file(Hook.ADDED, path2, file2)
     assert run2.status is RunStatus.FAILED and "ambiguous" in (run2.error or "")
 
 
-def test_parse_problems_are_reported_once_per_marker(env):
-    path, file, parsed = add_file(env, "x--ok@@bad_/a.txt")  # "@@bad_": trailing "_"
-    assert parsed.problems
+def test_legacy_function_markers_are_reported_once_per_marker(env):
+    path, file = add_file(env, "x--ok@@make_copy__.jpg/a.txt")
+    assert [t.name for t in file.tags] == ["ok"]
 
-    env.runner.on_file(Hook.ADDED, path, file, parsed)
-    env.runner.on_file(Hook.MODIFIED, path, file, parsed)
+    env.runner.on_file(Hook.ADDED, path, file)
+    env.runner.index(path)  # indexing again reports nothing new
 
-    assert len(problems(env, "name.parse")) == 1
-    assert problems(env, "name.parse")[0].severity is Severity.WARN
+    (reported,) = problems(env, "name.parse")
+    assert reported.severity is Severity.WARN
+    assert "'@@make_copy__.jpg'" in reported.message
+    assert ".tfsfunctions.yaml" in reported.message
 
 
 def test_capture_is_per_thread_and_leaves_nothing_behind(env):
@@ -697,11 +990,10 @@ def test_capture_is_per_thread_and_leaves_nothing_behind(env):
             print("quick print")
         """,
     )
-    path, file, parsed = add_file(env, "@@loud/a.txt")
-    (slow,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
-    (fast,) = env.runner.on_file(
-        Hook.MODIFIED, path, file, parsed
-    )  # while slow is in flight
+    enable(env, "job", "loud.run", "loud.quick")
+    path, file = add_file(env, "job/a.txt")
+    (slow,) = env.runner.on_file(Hook.ADDED, path, file)
+    (fast,) = env.runner.on_file(Hook.MODIFIED, path, file)  # while slow is in flight
     env.loader.addon_for("loud").module.gate.set()
     deadline = time.time() + 5
     while (
@@ -748,15 +1040,16 @@ def test_ctx_tag_normalizes_and_index_keeps_ctx_tags(env):
             pass
         """,
     )
-    path, file, parsed = add_file(env, "@@tagger/a.txt")
+    enable(env, "job", "tagger.run")
+    path, file = add_file(env, "job/a.txt")
 
-    env.runner.on_file(Hook.ADDED, path, file, parsed)
+    env.runner.on_file(Hook.ADDED, path, file)
 
     tagged = env.backend.query_file(path)
     assert [t.name for t in tagged.tags] == ["photo"]
     assert (
         len(env.store.query_runs(action_name="tagger", status=RunStatus.OK)) == 2
-    )  # added + one tagged
+    )  # added + one tagged (the default: nothing configures on_photo)
     out = env.backend.query_file("out/r--fromname.txt")
     assert sorted(t.name for t in out.tags) == ["fromctx", "fromname"]
 
@@ -777,9 +1070,10 @@ def test_ctx_delete_and_move_keep_the_database_in_step(env):
             return final.name
         """,
     )
-    path, file, parsed = add_file(env, "@@mover/a.txt")
+    enable(env, "job", "mover.run")
+    path, file = add_file(env, "job/a.txt")
 
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     assert run.status is RunStatus.OK
     assert env.backend.query_file("out/tmp.txt") is None
@@ -789,38 +1083,43 @@ def test_ctx_delete_and_move_keep_the_database_in_step(env):
     assert env.store.produced_by(run.id) == ["out/final.txt"]
 
 
-def test_index_refuses_tfs_and_script_zones(env):
+def test_index_refuses_tfs_script_and_functions_files(env):
     (env.root.tfs_dir / "junk.txt").write_text("x")
     (env.root.script_dir / "_data.txt").write_text("x")
+    (env.root.path / FUNCTIONS_FILE).write_text("version: 1\n")
 
     assert env.runner.index(env.root.tfs_dir / "junk.txt") is None
     assert env.runner.index(env.root.script_dir / "_data.txt") is None
+    assert env.runner.index(env.root.path / FUNCTIONS_FILE) is None
     assert env.backend.query_files(include_deleted=True) == []
 
 
-def test_binding_failure_key_matches_a_later_success(env):
+def test_unresolved_remote_is_retried_once_the_remote_exists(env):
     script(
         env,
-        "resize",
-        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: int): return width\n",
+        "ship",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, remote: action.Remote): return remote.name\n",
     )
-    path, file, parsed = add_file(env, "@@resize__wide/a.txt")
-    (failed,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
-    assert failed.status is RunStatus.FAILED and failed.args == {"width": "wide"}
+    enable(env, "job", "ship.run", remote="nas")
+    path, file = add_file(env, "job/a.txt")
+    (failed,) = env.runner.on_file(Hook.ADDED, path, file)
+    assert failed.status is RunStatus.FAILED and failed.args == {"remote": "nas"}
 
     # editing the script does not re-run a dead key (DESIGN §6.1)
     script(
         env,
-        "resize",
-        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, width: str): return width\n",
+        "ship",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c, remote: action.Remote): return remote.name + '!'\n",
     )
-    assert env.runner.on_file(Hook.ADDED, path, file, parsed) == []
+    assert env.runner.on_file(Hook.ADDED, path, file) == []
 
+    (env.tmp / "nas").mkdir()
+    env.runner.config.remotes["nas"] = str(env.tmp / "nas")
     retried = env.runner.retry(failed.id)
     assert (
         retried is not None
         and retried.status is RunStatus.OK
-        and retried.result == "wide"
+        and retried.result == "nas!"
     )
 
 
@@ -830,22 +1129,25 @@ def test_retry_rules(env):
         "flaky2",
         "from tag_file_system import action\n@action.added()\ndef run(p, m, c, n: int = 1):\n    raise RuntimeError('x')\n",
     )
-    path, file, parsed = add_file(env, "@@flaky2__3/a.txt")
-    (failed,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    enable(env, "job", "flaky2.run", n=3)
+    path, file = add_file(env, "job/a.txt")
+    (failed,) = env.runner.on_file(Hook.ADDED, path, file)
 
-    # signature changed since: the old key cannot be retried
+    # signature changed since: the run's own arguments no longer fit
     script(
         env,
         "flaky2",
         "from tag_file_system import action\n@action.added()\ndef run(p, m, c, count: int = 1):\n    return count\n",
     )
     assert env.runner.retry(failed.id) is None
-    assert problems(env, "retry.key_changed")
+    (why,) = problems(env, "retry.key_changed")
+    assert "unknown parameter(s) n" in why.message
 
     # ok runs are not retried; a deleted file is reported
-    ok_path, ok_file, ok_parsed = add_file(env, "@@flaky2__4/b.txt", b"b")
-    (ok,) = env.runner.on_file(Hook.ADDED, ok_path, ok_file, ok_parsed)
-    assert ok.status is RunStatus.OK
+    enable(env, "job2", "flaky2.run", count=4)
+    ok_path, ok_file = add_file(env, "job2/b.txt", b"b")
+    (ok,) = env.runner.on_file(Hook.ADDED, ok_path, ok_file)
+    assert ok.status is RunStatus.OK and ok.result == 4
     assert env.runner.retry(ok.id) is None
     path.unlink()
     env.backend.delete(path)
@@ -859,44 +1161,72 @@ def test_sys_exit_in_a_handler_is_a_failed_run(env):
         "quit",
         "import sys\nfrom tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    sys.exit(3)\n",
     )
-    path, file, parsed = add_file(env, "@@quit/a.txt")
+    enable(env, "job", "quit.run")
+    path, file = add_file(env, "job/a.txt")
 
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     assert run.status is RunStatus.FAILED and "SystemExit" in (run.error or "")
     assert env.runner.in_flight == {}
 
 
-def test_emitted_file_in_another_action_dir_runs_as_a_chain(env):
+def test_emitted_file_in_another_folder_runs_as_a_chain(env):
     script(
         env,
         "producer",
-        "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    c.write(c.root / '@@consumer' / 'made.txt', 'x')\n",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    c.write(c.root / 'consumer' / 'made.txt', 'x')\n",
     )
     script(
         env,
         "consumer",
         "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    return 'consumed'\n",
     )
-    path, file, parsed = add_file(env, "@@producer/a.txt")
+    enable(env, "job", "producer.run")
+    enable(env, "consumer", "consumer.run")
+    path, file = add_file(env, "job/a.txt")
 
-    (produced,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (produced,) = env.runner.on_file(Hook.ADDED, path, file)
 
     (consumed,) = env.store.query_runs(action_name="consumer")
     assert consumed.source is RunSource.CHAIN and consumed.parent_run_id == produced.id
     assert consumed.status is RunStatus.OK
     # the watcher's later event for made.txt finds the key and does nothing
-    made = env.root.absolute("@@consumer/made.txt")
+    made = env.root.absolute("consumer/made.txt")
     made_file = env.backend.query_file(made)
-    assert (
-        env.runner.on_file(
-            Hook.ADDED,
-            made,
-            made_file,
-            env.runner.parser.parse_path(PurePosixPath("@@consumer/made.txt")),
-        )
-        == []
+    assert env.runner.on_file(Hook.ADDED, made, made_file) == []
+
+
+def test_ctx_write_over_a_known_file_is_a_modification(env):
+    script(
+        env,
+        "writer",
+        "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    c.write(c.root / 'consumer' / 'made.txt', str(p.name))\n",
     )
+    script(
+        env,
+        "consumer",
+        """
+        from tag_file_system import action
+        calls = []
+
+        @action.added()
+        def run(p, m, c):
+            calls.append("added")
+
+        @action.modified()
+        def changed(p, m, c):
+            calls.append("modified")
+        """,
+    )
+    enable(env, "job", "writer.run")
+    enable(env, "consumer", "consumer.run", "consumer.changed")
+    first, first_file = add_file(env, "job/a.txt")
+    second, second_file = add_file(env, "job/b.txt", b"b")
+
+    env.runner.on_file(Hook.ADDED, first, first_file)
+    env.runner.on_file(Hook.ADDED, second, second_file)
+
+    assert env.loader.addon_for("consumer").module.calls == ["added", "modified"]
 
 
 def test_problems_from_runs_started_in_a_handler_are_delivered_after_it(env):
@@ -918,9 +1248,10 @@ def test_problems_from_runs_started_in_a_handler_are_delivered_after_it(env):
                 ctx.retry(problem.run_id)
         """,
     )
-    path, file, parsed = add_file(env, "@@retrier/a.txt")
+    enable(env, "job", "retrier.run")
+    path, file = add_file(env, "job/a.txt")
 
-    env.runner.on_file(Hook.ADDED, path, file, parsed)
+    env.runner.on_file(Hook.ADDED, path, file)
 
     seen = env.loader.addon_for("retrier").module.seen
     assert seen.count("run.failed") == 2  # the retried run's failure was delivered too
@@ -933,9 +1264,10 @@ def test_thread_failure_without_done_fails_the_run(env):
         "crashy",
         "from tag_file_system import action\n@action.added()\ndef run(p, m, c):\n    def w():\n        raise RuntimeError('in thread')\n    t = c.spawn(w)\n    t.join()\n",
     )
-    path, file, parsed = add_file(env, "@@crashy/a.txt")
+    enable(env, "job", "crashy.run")
+    path, file = add_file(env, "job/a.txt")
 
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     final = env.store.get_run(run.id)
     assert final.status is RunStatus.FAILED and "thread failed" in (final.error or "")
@@ -966,10 +1298,11 @@ def test_addon_stream_swaps_do_not_outlive_the_run(env):
             logging.getLogger("swapper").info("still captured")
         """,
     )
-    path, file, parsed = add_file(env, "@@swapper/a.txt")
+    enable(env, "job", "swapper.run", "swapper.again")
+    path, file = add_file(env, "job/a.txt")
     before = sys.stdout
 
-    env.runner.on_file(Hook.ADDED, path, file, parsed)
+    env.runner.on_file(Hook.ADDED, path, file)
 
     after = (
         sys.stdout
@@ -977,7 +1310,7 @@ def test_addon_stream_swaps_do_not_outlive_the_run(env):
     assert after is before or getattr(after, "original", None) is before
     assert not isinstance(getattr(after, "original", after), io.StringIO)
     assert not sys.stdout.closed and not sys.stderr.closed
-    (again,) = env.runner.on_file(Hook.MODIFIED, path, file, parsed)
+    (again,) = env.runner.on_file(Hook.MODIFIED, path, file)
     assert [t.payload for t in env.store.query_trace(again.id)] == [
         "info: still captured"
     ]
@@ -997,9 +1330,10 @@ def test_move_onto_an_existing_managed_file(env):
             ctx.move(path, target)
         """,
     )
-    path, file, parsed = add_file(env, "@@clobber/x.txt", b"new")
+    enable(env, "job", "clobber.run")
+    path, file = add_file(env, "job/x.txt", b"new")
 
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     assert run.status is RunStatus.OK
     assert env.backend.query_file(path) is None  # source row gone
@@ -1028,9 +1362,10 @@ def test_retry_storms_are_braked(env):
                 ctx.retry(problem.run_id)
         """,
     )
-    path, file, parsed = add_file(env, "@@loop/a.txt")
+    enable(env, "job", "loop.run")
+    path, file = add_file(env, "job/a.txt")
 
-    env.runner.on_file(Hook.ADDED, path, file, parsed)
+    env.runner.on_file(Hook.ADDED, path, file)
 
     assert len(env.loader.addon_for("loop").module.attempts) == MAX_RETRIES + 1
     assert problems(env, "retry.limit")
@@ -1048,9 +1383,10 @@ def test_non_serializable_result_fails_the_run(env):
             return object()
         """,
     )
-    path, file, parsed = add_file(env, "@@weird/a.txt")
+    enable(env, "job", "weird.run")
+    path, file = add_file(env, "job/a.txt")
 
-    (run,) = env.runner.on_file(Hook.ADDED, path, file, parsed)
+    (run,) = env.runner.on_file(Hook.ADDED, path, file)
 
     assert run.status is RunStatus.FAILED
     assert "not JSON-serializable" in (run.error or "")

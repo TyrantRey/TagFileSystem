@@ -1,6 +1,6 @@
 # Code by AkinoAlice@TyrantRey
 
-"""Stand-ins for ``uv``, ``pytest`` and ``tfs`` driven by a JSON scenario
+"""Stand-ins for ``uv``, ``pytest``, ``npm`` and ``tfs`` driven by a JSON scenario
 (``TFS_FAKE_SCENARIO``), so ``tests/test_upgrade.py`` can run the real
 orchestrator against a real git checkout without syncing a real venv or
 running a real suite.
@@ -103,6 +103,22 @@ def uv(args: list[str]) -> int:
     return 0
 
 
+def npm(args: list[str]) -> int:
+    """``npm ci`` / ``npm run build`` in Frontend/: logs the call with its
+    cwd; a build writes ``dist/index.html`` holding the release marker, so a
+    test can tell which code was built last. ``npm_fail`` lists the markers
+    whose build fails."""
+    log("npm", args=args, cwd=os.getcwd())
+    if repo_marker() in scenario().get("npm_fail", []):
+        print("fake npm: failing on purpose", file=sys.stderr)
+        return 1
+    if args[:2] == ["run", "build"]:
+        dist = Path.cwd() / "dist"
+        dist.mkdir(exist_ok=True)
+        (dist / "index.html").write_text(repo_marker(), encoding="utf-8")
+    return 0
+
+
 def pytest_(args: list[str]) -> int:
     log("pytest", args=args)
     if args[:1] == ["--version"]:
@@ -151,9 +167,11 @@ def start(root: Path) -> int:
     out = root / ".tfs" / "fake-daemon.out"
     kwargs: dict = {}
     if os.name == "nt":
+        # As cli._start_detached: a hidden console, so neither the launcher's
+        # interpreter nor this daemon's `git` calls open a console window.
         kwargs["creationflags"] = getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200
-        ) | getattr(subprocess, "DETACHED_PROCESS", 0x8)
+        ) | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
     else:
         kwargs["start_new_session"] = True
     before = read_lock(root)
@@ -259,6 +277,8 @@ def main(argv: list[str]) -> int:
         return uv(args)
     if tool == "pytest":
         return pytest_(args)
+    if tool == "npm":
+        return npm(args)
     if tool == "tfs":
         return tfs(args)
     if tool == "daemon":

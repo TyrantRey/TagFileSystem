@@ -37,8 +37,8 @@ def action(store: ActionStore) -> ActionRecord:
         name="make_copy",
         script_path="script/make_copy.py",
         script_hash="abc",
-        signature={"properties": {"suffix": {"type": "string"}}},
-        hooks=[Hook.ADDED, Hook.REMOVED],
+        signature={"run": {"properties": {"suffix": {"type": "string"}}}},
+        hooks={"run": [Hook.ADDED, Hook.REMOVED]},
     )
 
 
@@ -55,7 +55,11 @@ def add_file(backend: SQLiteBackend, key: str, file_hash: str = "h") -> str:
 
 def key_for(file_hash: str = "h", **args) -> RunKey:
     return RunKey(
-        file_hash=file_hash, action_name="make_copy", hook=Hook.ADDED, args=args
+        file_hash=file_hash,
+        action_name="make_copy",
+        handler="run",
+        hook=Hook.ADDED,
+        args=args,
     )
 
 
@@ -79,18 +83,22 @@ def test_register_action_upserts_by_name_and_hash(
 ):
     assert action.name == "make_copy"
     assert action.script_path == PurePosixPath("script/make_copy.py")
-    assert action.hooks == [Hook.ADDED, Hook.REMOVED]
-    assert action.signature == {"properties": {"suffix": {"type": "string"}}}
+    assert action.hooks == {"run": [Hook.ADDED, Hook.REMOVED]}
+    assert action.signature == {"run": {"properties": {"suffix": {"type": "string"}}}}
 
     same = store.register_action(
-        "make_copy", "script/make_copy.py", "abc", {"changed": True}, [Hook.ADDED]
+        "make_copy",
+        "script/make_copy.py",
+        "abc",
+        {"changed": True},
+        {"run": [Hook.ADDED], "gone": [Hook.REMOVED]},
     )
     assert same.id == action.id
     assert same.signature == {"changed": True}
-    assert same.hooks == [Hook.ADDED]
+    assert same.hooks == {"run": [Hook.ADDED], "gone": [Hook.REMOVED]}
     assert same.loaded_at >= action.loaded_at
 
-    newer = store.register_action("make_copy", "script/make_copy.py", "def", {}, [])
+    newer = store.register_action("make_copy", "script/make_copy.py", "def", {}, {})
     assert newer.id != action.id
     assert store.latest_action("make_copy") is not None
     assert store.latest_action("make_copy").id == newer.id
@@ -147,12 +155,20 @@ def test_run_key_is_canonical_and_hook_aware(store: ActionStore, action: ActionR
     )
     assert a.args_json == b.args_json == '{"x":1,"y":2}'
 
-    store.start_run(action, a, "make_copy__1__2", None, RunSource.RECONCILE)
+    store.start_run(action, a, "make_copy.run(x=1, y=2)", None, RunSource.RECONCILE)
     assert store.find_run(b) is not None
     removed = RunKey(
         file_hash="h", action_name="make_copy", hook=Hook.REMOVED, args={"x": 1, "y": 2}
     )
     assert store.find_run(removed) is None  # same hash+args, different hook
+    other_handler = RunKey(
+        file_hash="h",
+        action_name="make_copy",
+        handler="thumbnail",
+        hook=Hook.ADDED,
+        args={"x": 1, "y": 2},
+    )
+    assert store.find_run(other_handler) is None  # same script, another function
 
 
 def test_failed_and_retried_runs(store: ActionStore, action: ActionRecord):
@@ -250,6 +266,8 @@ def test_query_runs_filters(
     assert [r.id for r in store.query_runs(status=RunStatus.FAILED)] == [rb.id]
     assert len(store.query_runs(status=[RunStatus.OK, RunStatus.FAILED])) == 2
     assert store.query_runs(action_name="other") == []
+    assert len(store.query_runs(handler="run")) == 2
+    assert store.query_runs(handler="thumbnail") == []
     assert store.query_runs(file_path="missing.txt") == []
     assert len(store.query_runs(limit=1)) == 1
     future = datetime.now(UTC) + timedelta(days=1)
@@ -437,22 +455,29 @@ def test_run_key_is_hashable_and_compares_canonically():
     a = RunKey(file_hash="h", action_name="f", hook=Hook.ADDED, args={"x": 1, "y": 2})
     b = RunKey(file_hash="h", action_name="f", hook="added", args={"y": 2, "x": 1})  # type: ignore[arg-type]
     c = RunKey(file_hash="h", action_name="f", hook=Hook.REMOVED, args={"x": 1, "y": 2})
+    d = RunKey(
+        file_hash="h",
+        action_name="f",
+        handler="g",
+        hook=Hook.ADDED,
+        args={"x": 1, "y": 2},
+    )
 
     assert a == b and hash(a) == hash(b)
-    assert a != c
-    assert len({a, b, c}) == 2
+    assert a != c and a != d
+    assert len({a, b, c, d}) == 3
 
 
 def test_latest_action_follows_the_most_recent_load(store: ActionStore):
-    v1 = store.register_action("f", "script/f.py", "v1", {}, [])
-    store.register_action("f", "script/f.py", "v2", {}, [])
-    back = store.register_action("f", "script/f.py", "v1", {}, [])  # script reverted
+    v1 = store.register_action("f", "script/f.py", "v1", {}, {})
+    store.register_action("f", "script/f.py", "v2", {}, {})
+    back = store.register_action("f", "script/f.py", "v1", {}, {})  # script reverted
 
     assert back.id == v1.id
     latest = store.latest_action("f")
     assert latest is not None and latest.script_hash == "v1"
     assert store.register_action(
-        "g", PureWindowsPath("script\\g.py"), "x", {}, []
+        "g", PureWindowsPath("script\\g.py"), "x", {}, {}
     ).script_path == PurePosixPath("script/g.py")
 
 

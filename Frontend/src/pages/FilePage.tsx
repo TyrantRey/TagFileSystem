@@ -1,0 +1,261 @@
+import { useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+
+import { ApiError, apiBlob } from "../api/client";
+import type { Explain, FileDetail, FileHistory } from "../api/types";
+import { useApi } from "../api/useApi";
+import {
+  Badge,
+  Empty,
+  ErrorBox,
+  Loading,
+  PageHeader,
+  TagChips,
+  When,
+} from "../components/bits";
+import { TagEditor } from "../components/TagEditor";
+import { Timeline } from "../components/Timeline";
+import { bytes, folderOf, short } from "../lib/fmt";
+
+/** Fetch the bytes with the token and hand them to the browser as a file
+ * (DESIGN/v0-5-0.md §12.2: the token never rides in a URL). */
+function DownloadButton({ path, name }: { path: string; name: string }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const download = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const { blob, filename } = await apiBlob("/file/content", { path });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename ?? name;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : String(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <button type="button" disabled={busy} onClick={() => void download()}>
+        {busy ? "Downloading…" : "Download"}
+      </button>
+      {error && <span className="err"> {error}</span>}
+    </>
+  );
+}
+
+function Explained({ explain }: { explain: Explain }) {
+  return (
+    <>
+      {!explain.known && (
+        <p className="muted">
+          Not indexed: what applies is read from the name alone.
+        </p>
+      )}
+      {explain.applied.length === 0 && (
+        <Empty>Nothing applies to this file.</Empty>
+      )}
+      {explain.applied.length > 0 && (
+        <table>
+          <thead>
+            <tr>
+              <th>Handler</th>
+              <th>Hooks</th>
+              <th>From</th>
+            </tr>
+          </thead>
+          <tbody>
+            {explain.applied.map((entry, index) => (
+              <tr key={`${entry.file}-${entry.display}-${index}`}>
+                <td className="mono">{entry.display}</td>
+                <td>{entry.hooks.join(", ") || "–"}</td>
+                <td className="mono muted">{entry.file}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {explain.suppressed.length > 0 && (
+        <>
+          <h2>Suppressed</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Handler</th>
+                <th>From</th>
+                <th>Excluded by</th>
+              </tr>
+            </thead>
+            <tbody>
+              {explain.suppressed.map((entry, index) => (
+                <tr key={`${entry.file}-${entry.display}-${index}`}>
+                  <td className="mono">{entry.display}</td>
+                  <td className="mono muted">{entry.file}</td>
+                  <td className="mono">{entry.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+      {explain.defaults.length > 0 && (
+        <>
+          <h2>Tagged defaults</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Handler</th>
+                <th>Tag</th>
+                <th>Note</th>
+              </tr>
+            </thead>
+            <tbody>
+              {explain.defaults.map((d) => (
+                <tr key={`${d.script}.${d.handler}-${d.tag}`}>
+                  <td className="mono">
+                    {d.script}.{d.handler}
+                  </td>
+                  <td>
+                    <TagChips tags={[d.tag]} />
+                  </td>
+                  <td className="muted">
+                    {d.suppressed_by ? (
+                      <>
+                        suppressed by{" "}
+                        <span className="mono">{d.suppressed_by}</span>
+                      </>
+                    ) : (
+                      "applies"
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+      {explain.problems.length > 0 && (
+        <>
+          <h2>Configuration problems</h2>
+          <ul>
+            {explain.problems.map((p, index) => (
+              <li key={index}>
+                <Badge value={p.severity} />{" "}
+                <span className="kind">{p.kind}</span> {p.message}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </>
+  );
+}
+
+export function FilePage() {
+  const [search] = useSearchParams();
+  const path = search.get("path") ?? "";
+  const detail = useApi<FileDetail>("/file", { path, deleted: true });
+  const explain = useApi<Explain>("/file/explain", { path });
+  const history = useApi<FileHistory>("/file/history", { path });
+  const f = detail.data;
+
+  if (!path) {
+    return (
+      <div className="banner banner-warn">
+        No file named: open one from the Files page.
+      </div>
+    );
+  }
+  return (
+    <>
+      <PageHeader
+        title={<span className="path">{path}</span>}
+        onRefresh={() => {
+          detail.reload();
+          explain.reload();
+          history.reload();
+        }}
+        loading={detail.loading}
+      >
+        <Link
+          to={`/files?prefix=${encodeURIComponent(folderOf(path))}`}
+          className="muted"
+        >
+          in {folderOf(path)}
+        </Link>
+        {f && f.status !== "deleted" && (
+          <DownloadButton path={path} name={path.split("/").pop() ?? path} />
+        )}
+      </PageHeader>
+      {detail.error && <ErrorBox error={detail.error} />}
+      {!f && !detail.error && <Loading />}
+      {f && (
+        <div className="panel">
+          <dl className="fields">
+            <dt>Tags</dt>
+            <dd>
+              {f.status === "deleted" ? (
+                <TagChips tags={f.tags} />
+              ) : (
+                <TagEditor
+                  path={path}
+                  tags={f.tags}
+                  nameTags={f.name_tags ?? []}
+                  onChanged={() => {
+                    detail.reload();
+                    explain.reload();
+                    history.reload();
+                  }}
+                />
+              )}
+            </dd>
+            <dt>Status</dt>
+            <dd>
+              <Badge value={f.status === "deleted" ? "muted" : "ok"} />{" "}
+              {f.status}
+            </dd>
+            <dt>Size</dt>
+            <dd>{bytes(f.size)}</dd>
+            <dt>Type</dt>
+            <dd>
+              {f.mime_type ?? "–"}{" "}
+              <span className="muted">{f.format ?? ""}</span>
+            </dd>
+            <dt>Hash</dt>
+            <dd className="mono" title={f.hash}>
+              {short(f.hash)}
+            </dd>
+            <dt>Added</dt>
+            <dd>
+              <When iso={f.added} />
+            </dd>
+            <dt>File id</dt>
+            <dd className="mono muted">{f.file_id}</dd>
+          </dl>
+        </div>
+      )}
+
+      <h2>What applies</h2>
+      {explain.error && <ErrorBox error={explain.error} />}
+      {explain.data && <Explained explain={explain.data} />}
+
+      <h2>History</h2>
+      {history.error && history.error.status !== 404 && (
+        <ErrorBox error={history.error} />
+      )}
+      {history.error && history.error.status === 404 && (
+        <Empty>Not indexed: no history yet.</Empty>
+      )}
+      {history.data && (
+        <Timeline entries={[...history.data.timeline].reverse()} />
+      )}
+    </>
+  );
+}

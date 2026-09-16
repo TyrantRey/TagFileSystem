@@ -14,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from tag_file_system.core.interface.file_metadata import TaggedFile
 from tag_file_system.core.interface.tag import ParsedPath
 from tag_file_system.database.sqlite import SQLiteBackend
-from tag_file_system.root import OutsideRoot, Root
+from tag_file_system.root import FUNCTIONS_FILE, OutsideRoot, Root, same_name
 from tag_file_system.services.file_info import compute_file_hash, guess_mime_type
 from tag_file_system.services.tagging import TaggingParser
 
@@ -69,6 +69,10 @@ class Indexer:
         except OutsideRoot:
             return None
         if not abs_path.is_file():
+            return None
+        if same_name(abs_path.name, FUNCTIONS_FILE):
+            # A folder's configuration is read by FunctionsStore; it is never
+            # a data file (DESIGN/v0-4-0.md §3.2).
             return None
 
         stat = abs_path.stat()

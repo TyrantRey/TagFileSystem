@@ -11,15 +11,22 @@ The version is read from ``pyproject.toml`` in the checkout before the
 installed metadata is consulted: ``tfs upgrade`` syncs with
 ``--no-install-project`` (see ``updater.py``), which leaves the editable
 install's ``.dist-info`` at the previous version on purpose.
+
+Outside a checkout the commit comes from ``$TFS_COMMIT`` when it holds a
+full hash: the Docker image is built from a checkout it does not carry, and
+stamps the commit into the environment instead (DESIGN/v0-5-0.md §10.2).
 """
 
+import os
 import re
 import subprocess
 import tomllib
+from collections.abc import Mapping
 from importlib import metadata
 from pathlib import Path
 
 PACKAGE = "tag_file_system"
+COMMIT_ENV = "TFS_COMMIT"
 
 _HASH = re.compile(r"[0-9a-f]{40}")
 
@@ -105,6 +112,13 @@ def _git_rev_parse(repo: Path) -> str | None:
     return value if result.returncode == 0 and _HASH.fullmatch(value) else None
 
 
+def commit_from_env(environ: Mapping[str, str] = os.environ) -> str | None:
+    """``$TFS_COMMIT`` as a full lowercase hash, or ``None``: anything else
+    (a short hash, a tag name, an empty stamp) is "unknown", not a guess."""
+    value = environ.get(COMMIT_ENV, "").strip().lower()
+    return value if _HASH.fullmatch(value) else None
+
+
 def short(commit: str | None) -> str:
     return commit[:7] if commit else "unknown"
 
@@ -125,4 +139,5 @@ VERSION: str = (
     or _version_from_metadata()
     or "0.0.0"
 )
-COMMIT: str | None = git_head(REPO) if REPO else None
+# A checkout's HEAD is the truth; the stamp only fills in where there is none.
+COMMIT: str | None = git_head(REPO) if REPO else commit_from_env()

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SCHEMA_FILE = "src/tag_file_system/database/migrations.py"
-RELEASES = (("0.9.0", 1, "old"), ("1.0.0", 2, "new"))
+RELEASES = (("0.9.0", 2, "old"), ("1.0.0", 3, "new"))
 
 
 def git(repo: Path, *args: str) -> str:
@@ -50,6 +50,18 @@ def write_release(repo: Path, version: str, schema: int, marker: str) -> None:
         encoding="utf-8",
     )
     (repo / "marker.txt").write_text(marker, encoding="utf-8")
+    # The web UI's sources (DESIGN/v0-5-0.md §4): what `tfs upgrade` builds.
+    # dist/ is ignored, as in the real checkout, so a build never dirties it.
+    frontend = repo / "Frontend"
+    frontend.mkdir(exist_ok=True)
+    (frontend / "package.json").write_text(
+        f'{{"name": "fake-ui", "version": "{version}", "private": true}}\n',
+        encoding="utf-8",
+    )
+    (frontend / "package-lock.json").write_text("{}\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(
+        "Frontend/node_modules/\nFrontend/dist/\n", encoding="utf-8"
+    )
 
 
 def make_repo(

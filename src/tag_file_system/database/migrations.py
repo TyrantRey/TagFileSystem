@@ -16,6 +16,11 @@ Version 2 (DESIGN/v0-2-0.md §9) adds the ``upgrades`` table, so every root's
 history explains its own schema jumps, and stamps ``action_runs`` with the
 version and commit of the code that produced each run.
 
+Version 3 (DESIGN/v0-4-0.md §7) adds ``action_runs.handler``: handlers are
+addressed by name inside a script, so the run key gains a dimension and the
+key index is rebuilt to carry it. Rows written before have ``handler = ''``,
+which no Python function can be called, so no old key collides with a new one.
+
 ``tfs upgrade`` reads ``SCHEMA_VERSION`` out of a *target* checkout with
 ``git show`` and a regex, never by importing it: keep the assignment on one
 line, as a plain integer literal.
@@ -30,7 +35,7 @@ from uuid import uuid4
 from tag_file_system.core.logger import logger
 from tag_file_system.core.paths import is_anchored, posix_key
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class SchemaTooNew(RuntimeError):
@@ -357,8 +362,28 @@ def _migrate_2(
         connection.execute("ALTER TABLE action_runs ADD COLUMN code_hash TEXT")
 
 
+def _migrate_3(
+    connection: sqlite3.Connection, root_dir: Path | None, report: MigrationReport
+) -> None:
+    if "handler" not in _columns(connection, "action_runs"):
+        connection.execute(
+            "ALTER TABLE action_runs ADD COLUMN handler TEXT NOT NULL DEFAULT ''"
+        )
+    # The key index is created by V1_SCHEMA without the new column; a fresh
+    # database runs 1 -> 2 -> 3 and ends up with this one either way.
+    connection.execute("DROP INDEX IF EXISTS idx_action_runs_key")
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_action_runs_key "
+        "ON action_runs(file_hash, action_name, handler, hook, args_json)"
+    )
+
+
 Migration = Callable[[sqlite3.Connection, Path | None, MigrationReport], None]
-MIGRATIONS: list[tuple[int, Migration]] = [(1, _migrate_1), (2, _migrate_2)]
+MIGRATIONS: list[tuple[int, Migration]] = [
+    (1, _migrate_1),
+    (2, _migrate_2),
+    (3, _migrate_3),
+]
 
 
 def user_version(connection: sqlite3.Connection) -> int:
